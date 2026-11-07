@@ -49,7 +49,7 @@
             "max": 15
         },
         "show-world-text": {
-            "name": "NanGD In-Level Popup",
+            "name": "O",
             "description": "Hien chu so Frame co mau ngay tai vi tri nhan vat nhay tren man choi.",
             "type": "bool",
             "default": true
