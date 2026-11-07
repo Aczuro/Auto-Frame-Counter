@@ -10,5 +10,25 @@
     "name": "Auto Frame Counter",
     "version": "v1.0.0-alpha.1",
     "developer": "Roper",
-    "description": "This mod auto counter frame window by your record run."
+    "description": "This mod auto counter frame window by your record run.",
+    "settings": {
+        "toggle-mod-key": {
+            "name": "Toggle Mod Key",
+            "description": "On/Off mod",
+            "type": "keybind",
+            "default": { "key": "cocos2d::enumKeyCodes::KEY_F2" }
+        },
+        "rec-key": {
+            "name": "Record Key",
+            "description": "On/Off record",
+            "type": "keybind",
+            "default": { "key": "cocos2d::enumKeyCodes::KEY_F3" }
+        },
+        "scan-key": {
+            "name": "Scan Key",
+            "description": "Trajectory (SCAN)",
+            "type": "keybind",
+            "default": { "key": "cocos2d::enumKeyCodes::KEY_F4" }
+        }
+    }
 }
