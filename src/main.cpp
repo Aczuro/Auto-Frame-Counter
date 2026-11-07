@@ -7,7 +7,6 @@
 
 using namespace geode::prelude;
 
-// Chuyển đổi tên phím trong Setting sang mã phím của Cocos2d
 static cocos2d::enumKeyCodes stringToKeyCode(std::string const& keyStr) {
     if (keyStr == "C") return cocos2d::KEY_C;
     if (keyStr == "F") return cocos2d::KEY_F;
@@ -26,9 +25,8 @@ static cocos2d::enumKeyCodes stringToKeyCode(std::string const& keyStr) {
     return cocos2d::KEY_C;
 }
 
-// Bảng màu theo phong cách NanGD dựa trên độ hẹp của Frame
 static ccColor3B getColorForFrames(int frames) {
-    if (frames <= 1) return {255, 45, 45};   // 1 Frame (Frame Perfect): Đỏ rực
+    if (frames <= 1) return {255, 45, 45};   // 1 Frame: Đỏ
     if (frames == 2) return {255, 150, 30};  // 2 Frames: Cam
     if (frames <= 4) return {255, 235, 50};  // 3 - 4 Frames: Vàng
     return {65, 255, 95};                    // >= 5 Frames: Xanh lá
@@ -57,19 +55,16 @@ class $modify(AFCPlayLayer, PlayLayer) {
 
         auto winSize = CCDirector::sharedDirector()->getWinSize();
 
-        // Tạo vùng chứa UI góc trái trên
         auto container = CCNode::create();
-        container->setPosition({18.f, winSize.height - 42.f});
+        container->setPosition(ccp(18.f, winSize.height - 42.f));
         container->setZOrder(1000);
         this->addChild(container);
         m_fields->m_hudContainer = container;
 
-        // Tạo Menu để người chơi trên Mobile hoặc PC có thể click thẳng vào Icon để Bật/Tắt
         auto menu = CCMenu::create();
-        menu->setPosition({0.f, 0.f});
+        menu->setPosition(ccp(0.f, 0.f));
         container->addChild(menu);
 
-        // Icon hiển thị trên UI (Dùng icon có sẵn của GD để an toàn 100%)
         auto iconSprite = CCSprite::createWithSpriteFrameName("GJ_infoIcon_001.png");
         if (!iconSprite) {
             iconSprite = CCSprite::create("GJ_button_01.png");
@@ -82,14 +77,13 @@ class $modify(AFCPlayLayer, PlayLayer) {
             this,
             menu_selector(AFCPlayLayer::onToggleModBtn)
         );
-        iconBtn->setPosition({0.f, 0.f});
+        iconBtn->setPosition(ccp(0.f, 0.f));
         menu->addChild(iconBtn);
 
-        // Chữ hiển thị bộ đếm kế bên Icon
-        auto label = CCLabelBMFont::create("FP: 0 | Total: 0", "bigFont.fnt");
+        auto label = CCLabelBMFont::create("1F: 0 | Tight: 0", "bigFont.fnt");
         label->setScale(0.35f);
-        label->setAnchorPoint({0.f, 0.5f});
-        label->setPosition({14.f, 0.f});
+        label->setAnchorPoint(ccp(0.f, 0.5f));
+        label->setPosition(ccp(14.f, 0.f));
         label->setOpacity(220);
         container->addChild(label);
         m_fields->m_hudLabel = label;
@@ -98,7 +92,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         return true;
     }
 
-    // Nút bấm vào Icon trên màn hình để Bật/Tắt Mod
     void onToggleModBtn(CCObject*) {
         bool current = Mod::get()->getSettingValue<bool>("enable-mod");
         Mod::get()->setSettingValue("enable-mod", !current);
@@ -146,7 +139,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         }
     }
 
-    // Tạo chữ nổi có màu + âm thanh ngay tại vị trí nhân vật nhảy (Phong cách NanGD)
     void spawnNanGDPopup(CCPoint worldPos, int frames, int refFPS) {
         bool showWorld = Mod::get()->getSettingValue<bool>("show-world-text");
         bool playSound = Mod::get()->getSettingValue<bool>("enable-sound");
@@ -154,14 +146,11 @@ class $modify(AFCPlayLayer, PlayLayer) {
 
         ccColor3B color = getColorForFrames(frames);
 
-        // 1. Phát âm thanh có cao độ (pitch) thay đổi theo số Frame
         if (playSound && volume > 0.01f) {
-            // Càng ít frame (càng khó) thì âm thanh càng cao và đanh
             float pitch = std::clamp(1.45f - (frames - 1) * 0.12f, 0.85f, 1.5f);
             FMODAudioEngine::sharedEngine()->playEffect("crystal01.ogg", pitch, 0.f, volume);
         }
 
-        // 2. Tạo chữ nổi trực tiếp vào m_objectLayer tại tọa độ nhảy
         if (showWorld && this->m_objectLayer) {
             int equivFPS = std::max(1, refFPS / std::max(1, frames));
             std::string popupStr = (frames == 1)
@@ -169,16 +158,15 @@ class $modify(AFCPlayLayer, PlayLayer) {
                 : fmt::format("{} FRAMES", frames);
 
             auto worldLabel = CCLabelBMFont::create(popupStr.c_str(), "bigFont.fnt");
-            worldLabel->setPosition(worldPos + CCPoint{0.f, 26.f});
+            worldLabel->setPosition(ccp(worldPos.x, worldPos.y + 26.f));
             worldLabel->setScale(0.0f);
             worldLabel->setColor(color);
             worldLabel->setZOrder(9999);
             this->m_objectLayer->addChild(worldLabel);
 
-            // Hiệu ứng phóng to nảy nhẹ, bay lên và mờ dần giống video NanGD
             float targetScale = (frames == 1) ? 0.42f : 0.34f;
             auto scaleUp = CCEaseBackOut::create(CCScaleTo::create(0.15f, targetScale));
-            auto moveUp  = CCMoveBy::create(1.1f, {0.f, 24.f});
+            auto moveUp  = CCMoveBy::create(1.1f, ccp(0.f, 24.f));
             auto wait    = CCDelayTime::create(0.65f);
             auto fadeOut = CCFadeOut::create(0.45f);
             auto remove  = CCRemoveSelf::create();
@@ -194,18 +182,10 @@ class $modify(AFCPlayLayer, PlayLayer) {
         }
     }
 
-    // Tính toán độ hẹp của pha bấm dựa trên khoảng cách chướng ngại vật & thời gian giữ phím
     int estimateFrameWindow(double holdDuration, int refFPS) {
-        // Quy đổi thời gian nhấp sang số frame ở mức Reference FPS
         int holdFrames = static_cast<int>(std::round(holdDuration * refFPS));
         if (holdFrames < 1) holdFrames = 1;
-
-        // Kiểm tra thêm vận tốc và trạng thái của nhân vật để ước lượng độ khó tại điểm nhấn
-        if (this->m_player1) {
-            // Nếu là cú nhấp thả cực nhanh (micro-click) hoặc nhấp căn chuẩn
-            return std::clamp(holdFrames, 1, 15);
-        }
-        return holdFrames;
+        return std::clamp(holdFrames, 1, 15);
     }
 
     void postUpdate(float dt) {
@@ -216,17 +196,14 @@ class $modify(AFCPlayLayer, PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
         m_fields->m_isHolding = false;
-        // Giữ hoặc làm mới trạng thái hiển thị khi chết/chơi lại
         this->updateHUDState();
     }
 };
 
-// Bắt thao tác bấm trên cả PC (Chuột trái, Space, Mũi tên lên) và Mobile (Chạm màn hình)
 class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
 
-        // Chỉ tính nút Jump (button == 1) của Player 1 khi đang ở trong PlayLayer
         if (button != 1 || !isPlayer1) return;
 
         auto playLayer = PlayLayer::get();
@@ -251,7 +228,6 @@ class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
 
             int frames = afcLayer->estimateFrameWindow(holdDuration, refFPS);
 
-            // Nếu số frame nằm trong ngưỡng hiển thị đã cài trong Setting
             if (frames <= maxDisplayFrames) {
                 fields->m_lastFrames = frames;
                 fields->m_totalTightClicks++;
@@ -266,10 +242,9 @@ class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
     }
 };
 
-// Bắt phím tắt bàn phím trên PC (Bật/Tắt Mod & Reset bộ đếm)
 class $modify(AFCUILayer, UILayer) {
-    void keyDown(cocos2d::enumKeyCodes key) {
-        UILayer::keyDown(key);
+    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
+        UILayer::keyDown(key, timestamp);
 
         auto playLayer = PlayLayer::get();
         if (!playLayer) return;
