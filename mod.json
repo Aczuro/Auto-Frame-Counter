@@ -6,9 +6,9 @@
         "mac": "2.2081",
         "ios": "2.2081"
     },
-    "id": "tenban.frame-window-counter",
+    "id": "roper.frame-window-counter",
     "name": "Frame Window Counter",
     "version": "v1.0.0",
-    "developer": "TenBan",
+    "developer": "Roper",
     "description": "Tự động đo cửa sổ frame của một cú nhảy trong Practice Mode"
 }
