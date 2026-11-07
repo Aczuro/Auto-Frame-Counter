@@ -1,735 +1,1010 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/UILayer.hpp>
-#include <vector>
+#include <Geode/modify/CheckpointObject.hpp>
 #include <fstream>
 #include <sstream>
 #include <cmath>
 #include <algorithm>
-#include <cctype>
+#include <deque>
+
+#ifdef GEODE_IS_WINDOWS
+#include <Windows.h>
+#endif
 
 using namespace geode::prelude;
 
-struct FramePointData {
-    float x;
-    float y;
-    int frames;
-    bool isClick;
-    bool triggered;
+// ===== Tham số cấu hình kiểm tra Trajectory & Frame Window =====
+constexpr int MAX_BACKWARD_FRAMES = 12;  // Số frame tối đa lùi về trước cú click/release để kiểm tra
+constexpr int MAX_FORWARD_FRAMES  = 12;  // Số frame tối đa tiến về sau cú click/release để kiểm tra
+constexpr int MIN_SURVIVE_FRAMES  = 75;  // Số frame tối thiểu nhân vật phải sống sót sau cú thao tác
+constexpr int PREVIEW_STEPS       = 110; // Độ dài đường dự đoán quỹ đạo phía trước (Ahead Trajectory)
+constexpr int WHITE_TRAIL_MAX_PTS = 180; // Độ dài vệt quỹ đạo trắng đi theo nhân vật
+constexpr int MAX_BUCKET          = 10;  // Thống kê từ 1F đến 10F và 11F+
+
+enum class BotStage {
+    Record,   // Ghi macro trong Practice Mode từ 0 -> 100%
+    Analyze,  // Bot chạy lại + lùi/tiến frame kiểm tra bằng Trajectory
+    Replay    // Phát lại Macro + hiển thị dữ liệu Frame Window đã phân tích
 };
 
-// Bộ chuyển đổi Custom Key: Nhận diện mọi phím người dùng tự nhập (không phân biệt hoa/thường)
-static cocos2d::enumKeyCodes stringToKeyCode(std::string rawStr) {
-    std::string s;
-    for (unsigned char c : rawStr) {
-        if (!std::isspace(c)) {
-            s += static_cast<char>(std::toupper(c));
+struct MacroInput {
+    int frame = 0;
+    bool down = true;
+    int button = 1;
+    bool player1 = true;
+    float x = 0.f;
+    float y = 0.f;
+
+    // Kết quả phân tích Frame Window bằng Trajectory
+    bool analyzed = false;
+    int backwardFrames = 0;
+    int forwardFrames = 0;
+    int windowSize = 1;
+};
+
+struct TrajectoryBranch {
+    int delta = 0;
+    bool survived = false;
+    std::vector<CCPoint> points;
+};
+
+struct CheckpointSnapshot {
+    int frame = 0;
+    size_t inputCount = 0;
+    bool holdingP1 = false;
+};
+
+struct AFCState {
+    bool enabled = true;
+    bool showWhiteTrail = true;
+    bool showAheadTraj = true;
+    int targetFps = 240;
+
+    BotStage stage = BotStage::Analyze;
+    bool isSimulating = false;
+    bool simDead = false;
+
+    int currentFrame = 0;
+    size_t playbackIndex = 0;
+    bool holdingP1 = false;
+    bool analysisCompleted = false;
+
+    // Dữ liệu Macro và Checkpoint
+    std::vector<MacroInput> inputs;
+    std::unordered_map<CheckpointObject*, CheckpointSnapshot> checkpoints;
+
+    // Dữ liệu tiến trình Analyze (quét từng thao tác một để không gây đứng hình)
+    size_t analyzeActionIdx = 0;
+    std::vector<TrajectoryBranch> activeBranches;
+
+    // Thống kê và hiển thị
+    int tally[MAX_BUCKET + 2] = {};
+    std::deque<CCPoint> whiteTrail;
+    std::string lastPopupText;
+    int popupTimer = 0;
+
+    // Các Node đồ họa trên PlayLayer
+    CCNode* hudRoot = nullptr;
+    CCDrawNode* worldDrawer = nullptr;
+    CCLabelBMFont* tallyLabel = nullptr;
+    CCLabelBMFont* statusLabel = nullptr;
+    CCLabelBMFont* popupLabel = nullptr;
+    CCLabelBMFont* playerPopupLabel = nullptr;
+};
+
+inline AFCState g_afc;
+
+// ===== Hệ thống lưu / tải dữ liệu Macro + Frame Window theo từng màn chơi =====
+static std::filesystem::path getLevelDataPath(GJGameLevel* level) {
+    int id = level ? level->m_levelID.value() : 0;
+    std::string name = (id > 0) ? fmt::format("level_{}.afc", id)
+                                : fmt::format("editor_{}.afc", level ? std::string(level->m_levelName) : "unknown");
+    return Mod::get()->getSaveDir() / name;
+}
+
+static void recomputeTally() {
+    std::fill(std::begin(g_afc.tally), std::end(g_afc.tally), 0);
+    for (const auto& inp : g_afc.inputs) {
+        if (inp.analyzed && inp.windowSize > 0) {
+            int b = (inp.windowSize > MAX_BUCKET) ? (MAX_BUCKET + 1) : inp.windowSize;
+            g_afc.tally[b]++;
         }
     }
-    if (s.empty()) return cocos2d::KEY_None;
+}
 
-    // 1. Một ký tự đơn: Chữ cái A-Z hoặc Số 0-9
+static void saveMacroAndAnalysis(GJGameLevel* level) {
+    if (!level) return;
+    auto path = getLevelDataPath(level);
+    std::ofstream out(path, std::ios::trunc);
+    if (!out.is_open()) return;
+
+    out << (g_afc.analysisCompleted ? 1 : 0) << " " << g_afc.inputs.size() << "\n";
+    for (const auto& item : g_afc.inputs) {
+        out << item.frame << " "
+            << (item.down ? 1 : 0) << " "
+            << item.button << " "
+            << (item.player1 ? 1 : 0) << " "
+            << item.x << " "
+            << item.y << " "
+            << (item.analyzed ? 1 : 0) << " "
+            << item.backwardFrames << " "
+            << item.forwardFrames << " "
+            << item.windowSize << "\n";
+    }
+}
+
+static bool loadMacroAndAnalysis(GJGameLevel* level) {
+    g_afc.inputs.clear();
+    g_afc.analysisCompleted = false;
+    std::fill(std::begin(g_afc.tally), std::end(g_afc.tally), 0);
+
+    if (!level) return false;
+    auto path = getLevelDataPath(level);
+    if (!std::filesystem::exists(path)) return false;
+
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+
+    int completedFlag = 0;
+    size_t count = 0;
+    if (!(in >> completedFlag >> count)) return false;
+
+    g_afc.analysisCompleted = (completedFlag != 0);
+    g_afc.inputs.reserve(count);
+
+    for (size_t i = 0; i < count; i++) {
+        MacroInput item;
+        int downInt = 1, p1Int = 1, analyzedInt = 0;
+        if (!(in >> item.frame >> downInt >> item.button >> p1Int
+                 >> item.x >> item.y >> analyzedInt
+                 >> item.backwardFrames >> item.forwardFrames >> item.windowSize)) {
+            break;
+        }
+        item.down = (downInt != 0);
+        item.player1 = (p1Int != 0);
+        item.analyzed = (analyzedInt != 0);
+        g_afc.inputs.push_back(item);
+    }
+    recomputeTally();
+    return !g_afc.inputs.empty();
+}
+
+// ===== Đọc cấu hình từ Geode Settings =====
+static void syncSettingsFromMod() {
+    g_afc.enabled       = Mod::get()->getSettingValue<bool>("enable-mod");
+    g_afc.showWhiteTrail = Mod::get()->getSettingValue<bool>("show-white-trail");
+    g_afc.showAheadTraj  = Mod::get()->getSettingValue<bool>("show-ahead-trajectory");
+    g_afc.targetFps      = std::clamp(static_cast<int>(Mod::get()->getSettingValue<int64_t>("target-fps")), 60, 1000);
+}
+
+// ===== Hỗ trợ đọc phím tắt tùy chỉnh trên PC =====
+#ifdef GEODE_IS_WINDOWS
+static int parseCustomKeyString(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    if (s.empty()) return 0;
+
     if (s.size() == 1) {
         char c = s[0];
-        if (c >= 'A' && c <= 'Z') {
-            return static_cast<cocos2d::enumKeyCodes>(cocos2d::KEY_A + (c - 'A'));
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return static_cast<int>(c);
+    }
+    if (s == "SPACE") return VK_SPACE;
+    if (s == "TAB") return VK_TAB;
+    if (s == "SHIFT") return VK_SHIFT;
+    if (s == "CTRL" || s == "CONTROL") return VK_CONTROL;
+    if (s == "ALT") return VK_MENU;
+    if (s == "BACKSPACE" || s == "BACK") return VK_BACK;
+    if (s[0] == 'F' && s.size() >= 2 && s.size() <= 3) {
+        int fn = std::atoi(s.c_str() + 1);
+        if (fn >= 1 && fn <= 12) return VK_F1 + (fn - 1);
+    }
+    return 0;
+}
+#endif
+
+// ===== Công thức vật lý chuẩn xác của Geometry Dash 2.2 cho Ahead Trajectory =====
+struct ExactPlayerSim {
+    CCPoint pos;
+    double yVel = 0.0;
+    double gravity = 0.958199;
+    float gravityMod = 1.0f;
+    float speed = 0.9f;
+    float vehicleSize = 1.0f;
+    bool upsideDown = false;
+    bool onGround = false;
+
+    bool isShip = false;
+    bool isUfo = false;
+    bool isBall = false;
+    bool isWave = false;
+    bool isRobot = false;
+    bool isSpider = false;
+    bool isSwing = false;
+
+    static ExactPlayerSim fromPlayer(PlayerObject* p) {
+        ExactPlayerSim s;
+        if (!p) return s;
+        s.pos         = p->getPosition();
+        s.yVel        = p->m_yVelocity;
+        s.gravity     = p->m_gravity > 0.01 ? p->m_gravity : 0.958199;
+        s.gravityMod  = p->m_gravityMod != 0.f ? p->m_gravityMod : 1.0f;
+        s.speed       = p->m_playerSpeed;
+        s.vehicleSize = p->m_vehicleSize > 0.1f ? p->m_vehicleSize : 1.0f;
+        s.upsideDown  = p->m_isUpsideDown;
+        s.onGround    = p->m_isOnGround;
+        s.isShip      = p->m_isShip;
+        s.isUfo       = p->m_isBird;
+        s.isBall      = p->m_isBall;
+        s.isWave      = p->m_isDart;
+        s.isRobot     = p->m_isRobot;
+        s.isSpider    = p->m_isSpider;
+        s.isSwing     = p->m_isSwing;
+        return s;
+    }
+
+    // Hằng số vận tốc ngang chuẩn của Geometry Dash (đơn vị/giây) theo từng mốc tốc độ
+    float getHorizontalUnitsPerSec() const {
+        if (speed <= 0.75f) return 251.16008f; // 0.5x speed
+        if (speed <= 0.95f) return 311.58010f; // 1.0x speed
+        if (speed <= 1.15f) return 387.42014f; // 2.0x speed
+        if (speed <= 1.35f) return 468.00015f; // 3.0x speed
+        return 576.00018f;                     // 4.0x speed
+    }
+
+    // Bước tích phân vật lý khớp với PlayerObject::update & PlayerObject::updateJump của GD 2.2
+    void step(float dt, bool holding, bool justPressed) {
+        const float stepScale = dt * 60.0f; // Chuẩn hóa nội bộ của GD (60Hz base factor)
+        const float gravDir   = upsideDown ? -1.0f : 1.0f;
+        const float miniScale = (vehicleSize < 0.8f) ? 0.8f : 1.0f;
+
+        // 1. Dịch chuyển trục X
+        float dx = getHorizontalUnitsPerSec() * dt;
+        pos.x += dx;
+
+        // 2. Tính vận tốc trục Y theo đúng từng Gamemode của Geometry Dash
+        if (isWave) {
+            float waveSlope = (vehicleSize < 0.8f) ? 2.0f : 1.0f;
+            float dir = holding ? 1.0f : -1.0f;
+            if (upsideDown) dir = -dir;
+            yVel = (dx / stepScale) * dir * waveSlope;
+            pos.y += static_cast<float>(yVel * stepScale);
+            return;
         }
-        if (c >= '0' && c <= '9') {
-            return static_cast<cocos2d::enumKeyCodes>(cocos2d::KEY_Zero + (c - '0'));
+
+        if (isShip) {
+            // Công thức gia tốc của Ship trong GD 2.2
+            double accel = holding ? 1.35 : -1.08;
+            if (vehicleSize < 0.8f) accel *= 1.18;
+            yVel += accel * gravDir * gravityMod * (stepScale * 0.5f);
+            double maxUp = (vehicleSize < 0.8f) ? 8.5 : 8.0;
+            double maxDown = (vehicleSize < 0.8f) ? -7.2 : -6.4;
+            if (!upsideDown) {
+                yVel = std::clamp(yVel, maxDown, maxUp);
+            } else {
+                yVel = std::clamp(yVel, -maxUp, -maxDown);
+            }
+        } else if (isUfo) {
+            if (justPressed) {
+                yVel = ((vehicleSize < 0.8f) ? 7.2 : 7.8) * gravDir;
+                onGround = false;
+            } else {
+                yVel -= 0.68 * gravDir * gravityMod * (stepScale * 0.5f);
+            }
+            yVel = std::clamp(yVel, -10.5, 10.5);
+        } else if (isSwing) {
+            if (justPressed) {
+                upsideDown = !upsideDown;
+            }
+            double swingDir = upsideDown ? -1.0 : 1.0;
+            yVel -= 0.72 * swingDir * gravityMod * (stepScale * 0.5f);
+            yVel = std::clamp(yVel, -9.5, 9.5);
+        } else if (isBall) {
+            if (justPressed && onGround) {
+                upsideDown = !upsideDown;
+                onGround = false;
+                yVel = -1.5 * (upsideDown ? -1.0 : 1.0);
+            }
+            double ballGrav = upsideDown ? -0.62 : 0.62;
+            yVel -= ballGrav * gravityMod * (stepScale * 0.5f);
+            yVel = std::clamp(yVel, -12.0, 12.0);
+        } else {
+            // Cube / Robot
+            if ((justPressed || holding) && onGround) {
+                double jumpBoost = 11.180032 * miniScale;
+                yVel = jumpBoost * gravDir;
+                onGround = false;
+            }
+            yVel -= (gravity * 0.90) * gravDir * gravityMod * (stepScale * 0.5f);
+            yVel = std::clamp(yVel, -15.0, 15.0);
+        }
+
+        // Trong GD, độ dịch chuyển Y mỗi step bằng yVel * stepScale * 0.9f
+        pos.y += static_cast<float>(yVel * stepScale * 0.9f);
+
+        // Chạm mặt sàn cơ bản (y = 105 là mặt đất mặc định của GD)
+        if (!upsideDown && pos.y <= 105.0f) {
+            pos.y = 105.0f;
+            if (yVel < 0.0) yVel = 0.0;
+            onGround = true;
+        }
+    }
+};
+
+// Kiểm tra va chạm nhanh phục vụ vẽ đường dự đoán Ahead Trajectory
+static int checkTrajectoryCollision(PlayLayer* pl, const CCPoint& pt, float playerSize, ExactPlayerSim& sim) {
+    // Trả về: 0 = bình thường, 1 = chạm đất/khối block, -1 = chạm gai/vật cản chết
+    if (!pl || !pl->m_objects) return 0;
+
+    const float half = 14.0f * playerSize;
+    CCRect playerRect(pt.x - half, pt.y - half, half * 2.0f, half * 2.0f);
+    CCRect innerHazardRect(pt.x - half * 0.45f, pt.y - half * 0.45f, half * 0.9f, half * 0.9f);
+
+    int count = pl->m_objects->count();
+    for (int i = 0; i < count; i++) {
+        auto obj = static_cast<GameObject*>(pl->m_objects->objectAtIndex(i));
+        if (!obj || !obj->isVisible()) continue;
+
+        float ox = obj->getPositionX();
+        if (std::abs(ox - pt.x) > 90.0f) continue;
+        float oy = obj->getPositionY();
+        if (std::abs(oy - pt.y) > 90.0f) continue;
+
+        CCRect objRect = obj->getObjectRect();
+        if (objRect.size.width <= 0.1f || objRect.size.height <= 0.1f) continue;
+
+        auto type = obj->m_objectType;
+        if (type == GameObjectType::Hazard || type == GameObjectType::AnimatedHazard) {
+            if (innerHazardRect.intersectsRect(objRect)) {
+                return -1; // Chạm hitbox gai chết
+            }
+        } else if (type == GameObjectType::Solid) {
+            if (playerRect.intersectsRect(objRect)) {
+                // Nếu đáp lên mặt trên của block (trọng lực thường) hoặc mặt dưới (trọng lực ngược)
+                float topY = objRect.getMaxY();
+                float botY = objRect.getMinY();
+                if (!sim.upsideDown && sim.pos.y >= topY - 8.0f && sim.yVel <= 0.0) {
+                    sim.pos.y = topY + half;
+                    sim.yVel = 0.0;
+                    sim.onGround = true;
+                    return 1;
+                } else if (sim.upsideDown && sim.pos.y <= botY + 8.0f && sim.yVel >= 0.0) {
+                    sim.pos.y = botY - half;
+                    sim.yVel = 0.0;
+                    sim.onGround = true;
+                    return 1;
+                } else if (std::abs(pt.y - oy) < half * 0.85f) {
+                    return -1; // Đâm trực diện vào cạnh bên của khối Solid
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// ===== Cập nhật giao diện HUD (Đã xóa hoàn toàn chữ NanCounter) =====
+static void refreshHudText() {
+    if (!g_afc.hudRoot) return;
+    g_afc.hudRoot->setVisible(g_afc.enabled);
+    if (g_afc.worldDrawer) g_afc.worldDrawer->setVisible(g_afc.enabled);
+    if (!g_afc.enabled) return;
+
+    // 1. Bảng thống kê Frame Window bên trái (Không có dòng chữ NanCounter)
+    if (g_afc.tallyLabel) {
+        std::string s;
+        for (int w = 1; w <= MAX_BUCKET; w++) {
+            if (!s.empty()) s += "\n";
+            s += fmt::format("{}F: {}", w, g_afc.tally[w]);
+        }
+        s += fmt::format("\n{}+F: {}", MAX_BUCKET + 1, g_afc.tally[MAX_BUCKET + 1]);
+        g_afc.tallyLabel->setString(s.c_str());
+    }
+
+    // 2. Dòng trạng thái nhỏ gọn
+    if (g_afc.statusLabel) {
+        std::string modeStr;
+        if (g_afc.stage == BotStage::Record) {
+            modeStr = fmt::format("[RECORD] Frame: {} | Actions: {}", g_afc.currentFrame, g_afc.inputs.size());
+        } else if (g_afc.stage == BotStage::Analyze) {
+            modeStr = fmt::format(
+                "[ANALYZE] {}/{} | Frame: {}",
+                g_afc.analyzeActionIdx,
+                g_afc.inputs.size(),
+                g_afc.currentFrame
+            );
+        } else {
+            modeStr = fmt::format("[REPLAY] Frame: {} | Actions: {}", g_afc.currentFrame, g_afc.inputs.size());
+        }
+        g_afc.statusLabel->setString(modeStr.c_str());
+    }
+
+    // 3. Hiển thị số Frame Window vừa đo được
+    if (g_afc.popupLabel) {
+        if (g_afc.popupTimer > 0 && !g_afc.lastPopupText.empty()) {
+            g_afc.popupLabel->setString(g_afc.lastPopupText.c_str());
+            g_afc.popupLabel->setVisible(true);
+        } else {
+            g_afc.popupLabel->setVisible(false);
+        }
+    }
+}
+
+// ===== Vẽ White Trajectory Arc, Ahead Trajectory & Các nhánh Frame Window =====
+static void renderWorldTrajectories(PlayLayer* pl) {
+    if (!g_afc.worldDrawer || !pl || !pl->m_player1) return;
+    g_afc.worldDrawer->clear();
+    if (!g_afc.enabled) return;
+
+    // 1. Vẽ đường quỹ đạo màu trắng đi theo nhân vật (White Trajectory Arc)
+    if (g_afc.showWhiteTrail && g_afc.whiteTrail.size() >= 2) {
+        ccColor4F whiteCol = {1.0f, 1.0f, 1.0f, 0.85f};
+        for (size_t i = 0; i + 1 < g_afc.whiteTrail.size(); i++) {
+            g_afc.worldDrawer->drawSegment(g_afc.whiteTrail[i], g_afc.whiteTrail[i + 1], 1.6f, whiteCol);
         }
     }
 
-    // 2. Phím chức năng F1 -> F12
-    if (s == "F1")  return cocos2d::KEY_F1;
-    if (s == "F2")  return cocos2d::KEY_F2;
-    if (s == "F3")  return cocos2d::KEY_F3;
-    if (s == "F4")  return cocos2d::KEY_F4;
-    if (s == "F5")  return cocos2d::KEY_F5;
-    if (s == "F6")  return cocos2d::KEY_F6;
-    if (s == "F7")  return cocos2d::KEY_F7;
-    if (s == "F8")  return cocos2d::KEY_F8;
-    if (s == "F9")  return cocos2d::KEY_F9;
-    if (s == "F10") return cocos2d::KEY_F10;
-    if (s == "F11") return cocos2d::KEY_F11;
-    if (s == "F12") return cocos2d::KEY_F12;
+    // 2. Vẽ các nhánh Trajectory Backward/Forward của cú Click/Release vừa kiểm tra
+    for (const auto& branch : g_afc.activeBranches) {
+        if (branch.points.size() < 2) continue;
+        ccColor4F col;
+        float width = 1.2f;
+        if (branch.delta == 0) {
+            col = {1.0f, 0.92f, 0.15f, 0.95f}; // Vàng: Quỹ đạo frame gốc trong Macro
+            width = 1.9f;
+        } else if (branch.survived) {
+            col = {0.15f, 1.0f, 0.35f, 0.70f}; // Xanh lá: Các frame trước/sau khả thi
+        } else {
+            col = {1.0f, 0.20f, 0.20f, 0.45f}; // Đỏ: Các frame trước/sau bị va chạm chết
+        }
 
-    // 3. Các phím đặc biệt thông dụng trên PC
-    if (s == "TAB") return cocos2d::KEY_Tab;
-    if (s == "SPACE" || s == "SPACEBAR") return cocos2d::KEY_Space;
-    if (s == "SHIFT" || s == "LSHIFT") return cocos2d::KEY_LeftShift;
-    if (s == "RSHIFT") return cocos2d::KEY_RightShift;
-    if (s == "CTRL" || s == "CONTROL" || s == "LCTRL") return cocos2d::KEY_LeftControl;
-    if (s == "ALT" || s == "LALT") return cocos2d::KEY_LeftMenu;
-    if (s == "ENTER" || s == "RETURN") return cocos2d::KEY_Enter;
-    if (s == "BACKSPACE" || s == "BACK") return cocos2d::KEY_Backspace;
-    if (s == "DELETE" || s == "DEL") return cocos2d::KEY_Delete;
-    if (s == "INSERT" || s == "INS") return cocos2d::KEY_Insert;
-    if (s == "HOME") return cocos2d::KEY_Home;
-    if (s == "END") return cocos2d::KEY_End;
-    if (s == "PAGEUP" || s == "PGUP") return cocos2d::KEY_PageUp;
-    if (s == "PAGEDOWN" || s == "PGDN") return cocos2d::KEY_PageDown;
-    if (s == "UP") return cocos2d::KEY_Up;
-    if (s == "DOWN") return cocos2d::KEY_Down;
-    if (s == "LEFT") return cocos2d::KEY_Left;
-    if (s == "RIGHT") return cocos2d::KEY_Right;
+        for (size_t i = 0; i + 1 < branch.points.size(); i++) {
+            g_afc.worldDrawer->drawSegment(branch.points[i], branch.points[i + 1], width, col);
+        }
+        g_afc.worldDrawer->drawDot(branch.points.back(), branch.survived ? 2.4f : 3.2f, col);
+    }
 
-    return cocos2d::KEY_None;
-}
+    // 3. Vẽ đường dự đoán quỹ đạo bay phía trước nhân vật (Ahead Trajectory Preview)
+    if (g_afc.showAheadTraj && !pl->m_player1->m_isDead) {
+        float dt = 1.0f / static_cast<float>(g_afc.targetFps);
 
-// 7 bậc hiển thị của bảng NAN COUNTER
-static int getTierIndex(int frames) {
-    if (frames <= 1) return 0;
-    if (frames == 2) return 1;
-    if (frames == 3) return 2;
-    if (frames == 4) return 3;
-    if (frames <= 6) return 4;
-    if (frames <= 8) return 5;
-    return 6;
-}
+        // Vẽ 2 nhánh dự đoán: Nhánh 1 = Giữ chuột (Xanh lơ), Nhánh 2 = Thả chuột (Hồng cam)
+        for (int branchType = 0; branchType < 2; branchType++) {
+            bool holdBranch = (branchType == 0);
+            ExactPlayerSim sim = ExactPlayerSim::fromPlayer(pl->m_player1);
+            CCPoint prevPt = sim.pos;
+            ccColor4F previewCol = holdBranch
+                ? ccColor4F{0.20f, 0.88f, 1.0f, 0.75f}
+                : ccColor4F{1.0f, 0.55f, 0.20f, 0.65f};
 
-static ccColor3B getTierColor(int tierIdx) {
-    switch (tierIdx) {
-        case 0: return {255, 65, 55};    // 1: Đỏ
-        case 1: return {255, 165, 45};   // 2: Cam
-        case 2: return {255, 240, 75};   // 3: Vàng
-        case 3: return {255, 255, 255};  // 4: Trắng
-        case 4: return {115, 242, 130};  // 5-6: Xanh lá
-        case 5: return {100, 195, 255};  // 7-8: Xanh dương nhạt
-        default: return {125, 140, 255}; // 9-12: Tím xanh
+            for (int step = 0; step < PREVIEW_STEPS; step++) {
+                sim.step(dt, holdBranch, step == 0 && holdBranch);
+                int hit = checkTrajectoryCollision(pl, sim.pos, sim.vehicleSize, sim);
+
+                g_afc.worldDrawer->drawSegment(prevPt, sim.pos, 1.3f, previewCol);
+                prevPt = sim.pos;
+
+                if (hit == -1) {
+                    // Vẽ dấu chấm đỏ tại điểm dự đoán va chạm chết
+                    g_afc.worldDrawer->drawDot(sim.pos, 3.6f, {1.0f, 0.1f, 0.1f, 0.95f});
+                    break;
+                }
+            }
+        }
     }
 }
 
-static ccColor4F toColor4F(ccColor3B c, float alpha = 1.0f) {
-    return {c.r / 255.f, c.g / 255.f, c.b / 255.f, alpha};
-}
+// Tạo bản sao chuỗi Macro nhưng dịch chuyển thời điểm của thao tác `idx` đi `delta` frame (Backward < 0, Forward > 0)
+static std::vector<MacroInput> makeShiftedMacro(size_t idx, int delta) {
+    auto copy = g_afc.inputs;
+    int origFrame = copy[idx].frame;
+    int shiftedFrame = std::max(0, origFrame + delta);
 
-static void drawNanGDRing(CCDrawNode* drawer, CCPoint center, float radius, ccColor3B color) {
-    if (!drawer) return;
-    constexpr int segments = 28;
-    constexpr float twoPi = 6.2831853f;
-
-    ccColor4F blackBorder = {0.f, 0.f, 0.f, 0.95f};
-    ccColor4F innerColor  = toColor4F(color, 1.0f);
-
-    for (int i = 0; i < segments; ++i) {
-        float a1 = (i * twoPi) / segments;
-        float a2 = ((i + 1) * twoPi) / segments;
-        CCPoint p1 = ccp(center.x + std::cos(a1) * radius, center.y + std::sin(a1) * radius);
-        CCPoint p2 = ccp(center.x + std::cos(a2) * radius, center.y + std::sin(a2) * radius);
-        drawer->drawSegment(p1, p2, 3.8f, blackBorder);
+    if (idx > 0 && shiftedFrame <= copy[idx - 1].frame) {
+        shiftedFrame = copy[idx - 1].frame + 1;
     }
+    int realDelta = shiftedFrame - origFrame;
+    copy[idx].frame = shiftedFrame;
 
-    for (int i = 0; i < segments; ++i) {
-        float a1 = (i * twoPi) / segments;
-        float a2 = ((i + 1) * twoPi) / segments;
-        CCPoint p1 = ccp(center.x + std::cos(a1) * radius, center.y + std::sin(a1) * radius);
-        CCPoint p2 = ccp(center.x + std::cos(a2) * radius, center.y + std::sin(a2) * radius);
-        drawer->drawSegment(p1, p2, 2.5f, innerColor);
+    // Nếu thao tác đang xét là Click (down) và dịch sang phải chạm vào Release (up) kế tiếp,
+    // dịch luôn Release kế tiếp để giữ nguyên độ dài giữ chuột (hold duration)
+    if (copy[idx].down && idx + 1 < copy.size() && !copy[idx + 1].down) {
+        if (copy[idx + 1].frame <= shiftedFrame) {
+            copy[idx + 1].frame = std::max(shiftedFrame + 1, copy[idx + 1].frame + realDelta);
+        }
     }
+    return copy;
 }
 
 class $modify(AFCPlayLayer, PlayLayer) {
-    struct Fields {
-        CCNode* m_leftBoard = nullptr;
-        CCLabelBMFont* m_watermark = nullptr;
-        CCSprite* m_logoSprite = nullptr;
-        CCLabelBMFont* m_tierTitleLabels[7] = {nullptr};
-        CCLabelBMFont* m_tierValueLabels[7] = {nullptr};
-        CCLabelBMFont* m_tierGlowLabels[7]  = {nullptr};
-        int m_tierCounts[7] = {0, 0, 0, 0, 0, 0, 0};
-
-        CCDrawNode* m_trailDrawer = nullptr;
-        CCDrawNode* m_projDrawer = nullptr;
-        CCDrawNode* m_ringDrawer = nullptr;
-        CCNode* m_worldTextContainer = nullptr;
-
-        CCPoint m_prevPos = {0.f, 0.f};
-        CCPoint m_vel = {311.58f, 0.f};
-        float m_gravity = -2600.f;
-        bool m_hasPrevPos = false;
-        bool m_isHolding = false;
-        double m_pressStartTime = 0.0;
-        double m_elapsedTime = 0.0;
-        CCPoint m_pressPos = {0.f, 0.f};
-        CCPoint m_pressVel = {311.58f, 0.f};
-
-        std::vector<CCPoint> m_trailPoints;
-        std::vector<CCRect> m_nearbyHazards;
-        int m_hazardUpdateTick = 0;
-        std::vector<FramePointData> m_savedPoints;
-    };
-
-    std::filesystem::path getLevelMacroFilePath() {
-        int levelID = 0;
-        std::string levelName = "custom";
-        if (this->m_level) {
-            levelID = static_cast<int>(this->m_level->m_levelID);
-            levelName = std::string(this->m_level->m_levelName);
-            levelName.erase(std::remove_if(levelName.begin(), levelName.end(), [](unsigned char c) {
-                return !std::isalnum(c);
-            }), levelName.end());
-        }
-        if (levelName.empty()) levelName = "level";
-        return Mod::get()->getSaveDir() / fmt::format("macro_{}_{}.afc", levelID, levelName);
-    }
-
-    void loadSavedMacroFrames() {
-        m_fields->m_savedPoints.clear();
-        auto path = this->getLevelMacroFilePath();
-        std::ifstream in(path);
-        if (!in.is_open()) return;
-
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty()) continue;
-            std::stringstream ss(line);
-            FramePointData pt{};
-            int clickInt = 1;
-            if (ss >> pt.x >> pt.y >> pt.frames >> clickInt) {
-                pt.isClick = (clickInt != 0);
-                pt.triggered = false;
-                m_fields->m_savedPoints.push_back(pt);
-            }
-        }
-    }
-
-    void saveMacroFramesToDisk() {
-        auto path = this->getLevelMacroFilePath();
-        std::ofstream out(path, std::ios::trunc);
-        if (!out.is_open()) return;
-
-        for (auto const& pt : m_fields->m_savedPoints) {
-            out << pt.x << " " << pt.y << " " << pt.frames << " " << (pt.isClick ? 1 : 0) << "\n";
-        }
-    }
-
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
-            return false;
-        }
+        g_afc = AFCState{};
+        syncSettingsFromMod();
 
-        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
-        // 1. Bảng NAN COUNTER bên trái
-        auto board = CCNode::create();
-        board->setPosition(ccp(0.f, 0.f));
-        board->setZOrder(1000);
-        this->addChild(board);
-        m_fields->m_leftBoard = board;
+        bool hasSavedData = loadMacroAndAnalysis(level);
+        std::string modeSetting = Mod::get()->getSettingValue<std::string>("work-mode");
 
-        static const char* tierNames[7] = {
-            "1:", "2:", "3:", "4:", "5-6:", "7-8:", "9-12:"
-        };
-
-        float topY = winSize.height - 18.f;
-        float rowStep = 24.f;
-
-        for (int i = 0; i < 7; ++i) {
-            int rowFromTop = 6 - i;
-            float yPos = topY - rowFromTop * rowStep;
-            ccColor3B col = getTierColor(i);
-
-            auto titleLbl = CCLabelBMFont::create(tierNames[i], "bigFont.fnt");
-            titleLbl->setAnchorPoint(ccp(0.f, 0.5f));
-            titleLbl->setPosition(ccp(6.f, yPos));
-            titleLbl->setScale(0.52f);
-            titleLbl->setColor(col);
-            board->addChild(titleLbl);
-            m_fields->m_tierTitleLabels[i] = titleLbl;
-
-            auto glowLbl = CCLabelBMFont::create("0", "bigFont.fnt");
-            glowLbl->setAnchorPoint(ccp(0.5f, 0.5f));
-            glowLbl->setPosition(ccp(92.f, yPos));
-            glowLbl->setScale(0.62f);
-            glowLbl->setColor({255, 255, 255});
-            glowLbl->setOpacity(0);
-            board->addChild(glowLbl);
-            m_fields->m_tierGlowLabels[i] = glowLbl;
-
-            auto valLbl = CCLabelBMFont::create("0", "bigFont.fnt");
-            valLbl->setAnchorPoint(ccp(0.5f, 0.5f));
-            valLbl->setPosition(ccp(92.f, yPos));
-            valLbl->setScale(0.52f);
-            valLbl->setColor(col);
-            board->addChild(valLbl);
-            m_fields->m_tierValueLabels[i] = valLbl;
-        }
-
-        // 2. Nhãn NAN COUNTER kèm hiển thị Logo ở góc phải trên
-        auto watermark = CCLabelBMFont::create("NAN COUNTER", "bigFont.fnt");
-        watermark->setAnchorPoint(ccp(1.f, 0.5f));
-        watermark->setPosition(ccp(winSize.width - 8.f, winSize.height - 34.f));
-        watermark->setScale(0.40f);
-        watermark->setColor({200, 200, 200});
-        watermark->setOpacity(95);
-        watermark->setZOrder(1000);
-        this->addChild(watermark);
-        m_fields->m_watermark = watermark;
-
-        // Tự động đọc logo.png của mod (nếu đã đóng gói hợp lệ) để gắn kế bên chữ NAN COUNTER
-        if (auto logoSpr = CCSprite::create("logo.png"_spr)) {
-            float targetSize = 18.f;
-            float maxSide = std::max(logoSpr->getContentWidth(), logoSpr->getContentHeight());
-            if (maxSide > 0.f) {
-                logoSpr->setScale(targetSize / maxSide);
+        if (modeSetting == "Record Macro (Practice)") {
+            g_afc.stage = BotStage::Record;
+        } else if (modeSetting == "Replay Saved Data Only") {
+            g_afc.stage = BotStage::Replay;
+        } else {
+            // Auto (Analyze + Replay): Nếu đã có Macro mà chưa Analyze xong thì chạy Analyze,
+            // nếu đã Analyze xong thì phát Replay, nếu chưa có dữ liệu thì vào chế độ Record
+            if (!hasSavedData) {
+                g_afc.stage = BotStage::Record;
+            } else if (!g_afc.analysisCompleted) {
+                g_afc.stage = BotStage::Analyze;
+            } else {
+                g_afc.stage = BotStage::Replay;
             }
-            logoSpr->setPosition(ccp(
-                winSize.width - watermark->getScaledContentSize().width - 20.f,
-                winSize.height - 34.f
-            ));
-            logoSpr->setOpacity(150);
-            logoSpr->setZOrder(1000);
-            this->addChild(logoSpr);
-            m_fields->m_logoSprite = logoSpr;
         }
 
-        // 3. Khởi tạo các node vẽ trong m_objectLayer
-        if (this->m_objectLayer) {
-            auto trailDrawer = CCDrawNode::create();
-            trailDrawer->setZOrder(9990);
-            this->m_objectLayer->addChild(trailDrawer);
-            m_fields->m_trailDrawer = trailDrawer;
+        auto ws = CCDirector::get()->getWinSize();
 
-            auto projDrawer = CCDrawNode::create();
-            projDrawer->setZOrder(9991);
-            this->m_objectLayer->addChild(projDrawer);
-            m_fields->m_projDrawer = projDrawer;
-
-            auto ringDrawer = CCDrawNode::create();
-            ringDrawer->setZOrder(9995);
-            this->m_objectLayer->addChild(ringDrawer);
-            m_fields->m_ringDrawer = ringDrawer;
-
-            auto textContainer = CCNode::create();
-            textContainer->setPosition(ccp(0.f, 0.f));
-            textContainer->setZOrder(9996);
-            this->m_objectLayer->addChild(textContainer);
-            m_fields->m_worldTextContainer = textContainer;
+        // Lớp vẽ Trajectory gắn trực tiếp vào m_objectLayer để di chuyển khớp 100% với camera màn chơi
+        g_afc.worldDrawer = CCDrawNode::create();
+        if (m_objectLayer) {
+            m_objectLayer->addChild(g_afc.worldDrawer, 1500);
         }
 
-        this->loadSavedMacroFrames();
-        this->refreshBoardUI();
+        // Nhãn số Frame bay theo nhân vật trong thế giới game
+        g_afc.playerPopupLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        g_afc.playerPopupLabel->setScale(0.42f);
+        g_afc.playerPopupLabel->setVisible(false);
+        if (m_objectLayer) {
+            m_objectLayer->addChild(g_afc.playerPopupLabel, 1600);
+        }
 
+        // Container HUD trên màn hình
+        g_afc.hudRoot = CCNode::create();
+        this->addChild(g_afc.hudRoot, 1000);
+
+        // Bảng đếm 1F..10F+ ở góc trái trên (Không có chữ NanCounter)
+        g_afc.tallyLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        g_afc.tallyLabel->setScale(0.28f);
+        g_afc.tallyLabel->setOpacity(215);
+        g_afc.tallyLabel->setAnchorPoint({0.f, 1.f});
+        g_afc.tallyLabel->setPosition({8.f, ws.height - 8.f});
+        g_afc.hudRoot->addChild(g_afc.tallyLabel);
+
+        // Nhãn hiển thị cửa sổ Frame ở giữa phía trên
+        g_afc.popupLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        g_afc.popupLabel->setScale(0.55f);
+        g_afc.popupLabel->setOpacity(235);
+        g_afc.popupLabel->setAnchorPoint({0.5f, 1.f});
+        g_afc.popupLabel->setPosition({ws.width * 0.5f, ws.height - 10.f});
+        g_afc.hudRoot->addChild(g_afc.popupLabel);
+
+        // Nhãn trạng thái nhỏ ở cạnh dưới màn hình
+        g_afc.statusLabel = CCLabelBMFont::create("", "chatFont.fnt");
+        g_afc.statusLabel->setScale(0.55f);
+        g_afc.statusLabel->setOpacity(190);
+        g_afc.statusLabel->setAnchorPoint({0.5f, 0.f});
+        g_afc.statusLabel->setPosition({ws.width * 0.5f, 6.f});
+        g_afc.hudRoot->addChild(g_afc.statusLabel);
+
+        // Cụm nút bấm chuyển nhanh chế độ ở góc dưới phải (hỗ trợ cả chuột lẫn màn hình cảm ứng)
+        auto menu = CCMenu::create();
+        menu->setPosition({ws.width - 88.f, 22.f});
+        g_afc.hudRoot->addChild(menu, 10);
+
+        auto recSpr = ButtonSprite::create("REC", 32, true, "bigFont.fnt", "GJ_button_01.png", 22.f, 0.4f);
+        auto btnRec = CCMenuItemSpriteExtra::create(recSpr, this, menu_selector(AFCPlayLayer::onSwitchRecord));
+        btnRec->setPosition({-48.f, 0.f});
+
+        auto anaSpr = ButtonSprite::create("ANA", 32, true, "bigFont.fnt", "GJ_button_02.png", 22.f, 0.4f);
+        auto btnAna = CCMenuItemSpriteExtra::create(anaSpr, this, menu_selector(AFCPlayLayer::onSwitchAnalyze));
+        btnAna->setPosition({0.f, 0.f});
+
+        auto repSpr = ButtonSprite::create("REP", 32, true, "bigFont.fnt", "GJ_button_04.png", 22.f, 0.4f);
+        auto btnRep = CCMenuItemSpriteExtra::create(repSpr, this, menu_selector(AFCPlayLayer::onSwitchReplay));
+        btnRep->setPosition({48.f, 0.f});
+
+        menu->addChild(btnRec);
+        menu->addChild(btnAna);
+        menu->addChild(btnRep);
+
+        refreshHudText();
         return true;
     }
 
-    void refreshBoardUI() {
-        bool enabled = Mod::get()->getSettingValue<bool>("enable-mod");
-        if (m_fields->m_leftBoard) m_fields->m_leftBoard->setVisible(enabled);
-        if (m_fields->m_watermark) m_fields->m_watermark->setVisible(enabled);
-        if (m_fields->m_logoSprite) m_fields->m_logoSprite->setVisible(enabled);
-        if (m_fields->m_trailDrawer) m_fields->m_trailDrawer->setVisible(enabled);
-        if (m_fields->m_projDrawer) m_fields->m_projDrawer->setVisible(enabled);
-        if (m_fields->m_ringDrawer) m_fields->m_ringDrawer->setVisible(enabled);
-        if (m_fields->m_worldTextContainer) m_fields->m_worldTextContainer->setVisible(enabled);
+    void onSwitchRecord(CCObject*) {
+        g_afc.stage = BotStage::Record;
+        g_afc.inputs.clear();
+        g_afc.checkpoints.clear();
+        g_afc.activeBranches.clear();
+        g_afc.analysisCompleted = false;
+        std::fill(std::begin(g_afc.tally), std::end(g_afc.tally), 0);
+        this->resetLevel();
+        refreshHudText();
+    }
 
-        for (int i = 0; i < 7; ++i) {
-            if (!m_fields->m_tierValueLabels[i]) continue;
-            int cnt = m_fields->m_tierCounts[i];
-            m_fields->m_tierValueLabels[i]->setString(fmt::format("{}", cnt).c_str());
-
-            if (cnt == 0) {
-                m_fields->m_tierValueLabels[i]->setColor(getTierColor(i));
-                if (m_fields->m_tierGlowLabels[i]) {
-                    m_fields->m_tierGlowLabels[i]->setOpacity(0);
-                }
-            }
+    void onSwitchAnalyze(CCObject*) {
+        if (g_afc.inputs.empty()) {
+            loadMacroAndAnalysis(m_level);
         }
-    }
-
-    void incrementTierCount(int frames) {
-        int idx = getTierIndex(frames);
-        m_fields->m_tierCounts[idx]++;
-
-        auto valLbl  = m_fields->m_tierValueLabels[idx];
-        auto glowLbl = m_fields->m_tierGlowLabels[idx];
-        if (!valLbl || !glowLbl) return;
-
-        std::string numStr = fmt::format("{}", m_fields->m_tierCounts[idx]);
-        valLbl->setString(numStr.c_str());
-        glowLbl->setString(numStr.c_str());
-
-        valLbl->setColor({255, 235, 235});
-        valLbl->stopAllActions();
-        valLbl->setScale(0.64f);
-        valLbl->runAction(CCEaseBackOut::create(CCScaleTo::create(0.18f, 0.52f)));
-
-        glowLbl->stopAllActions();
-        glowLbl->setOpacity(175);
-        glowLbl->setScale(0.76f);
-        glowLbl->runAction(CCSpawn::createWithTwoActions(
-            CCScaleTo::create(0.35f, 0.62f),
-            CCFadeTo::create(0.35f, 95)
-        ));
-
-        if (Mod::get()->getSettingValue<bool>("enable-sound")) {
-            float vol = static_cast<float>(Mod::get()->getSettingValue<double>("sound-volume"));
-            if (vol > 0.01f) {
-                float pitch = std::clamp(1.45f - (frames - 1) * 0.08f, 0.85f, 1.45f);
-                FMODAudioEngine::sharedEngine()->playEffect("crystal01.ogg", pitch, 0.f, vol);
-            }
+        if (g_afc.inputs.empty()) {
+            FLAlertLayer::create(
+                "Auto Frame Counter",
+                "Chua co du lieu Macro! Hay bat Practice Mode va ghi Macro (REC) truoc.",
+                "OK"
+            )->show();
+            return;
         }
+        g_afc.stage = BotStage::Analyze;
+        g_afc.analyzeActionIdx = 0;
+        g_afc.analysisCompleted = false;
+        std::fill(std::begin(g_afc.tally), std::end(g_afc.tally), 0);
+        for (auto& inp : g_afc.inputs) inp.analyzed = false;
+        this->resetLevel();
+        refreshHudText();
     }
 
-    void spawnWorldMarker(CCPoint pos, int frames) {
-        if (!m_fields->m_ringDrawer || !m_fields->m_worldTextContainer) return;
-
-        int tierIdx = getTierIndex(frames);
-        ccColor3B color = getTierColor(tierIdx);
-
-        drawNanGDRing(m_fields->m_ringDrawer, pos, 11.5f, color);
-
-        auto numLbl = CCLabelBMFont::create(fmt::format("{}", frames).c_str(), "bigFont.fnt");
-        numLbl->setAnchorPoint(ccp(1.f, 0.5f));
-        numLbl->setPosition(ccp(pos.x - 15.f, pos.y));
-        numLbl->setScale(0.38f);
-        numLbl->setColor(color);
-        m_fields->m_worldTextContainer->addChild(numLbl);
-    }
-
-    void updateNearbyHazards(CCPoint playerPos) {
-        m_fields->m_nearbyHazards.clear();
-        if (!this->m_objects) return;
-
-        unsigned int count = this->m_objects->count();
-        for (unsigned int i = 0; i < count; ++i) {
-            auto node = static_cast<CCNode*>(this->m_objects->objectAtIndex(i));
-            if (!node) continue;
-
-            float ox = node->getPositionX();
-            float oy = node->getPositionY();
-
-            if (ox < playerPos.x - 70.f || ox > playerPos.x + 360.f) continue;
-            if (std::abs(oy - playerPos.y) > 260.f) continue;
-
-            CCRect box = node->boundingBox();
-            if (box.size.width < 4.f || box.size.height < 4.f) continue;
-            if (box.size.width > 120.f || box.size.height > 120.f) continue;
-
-            CCRect hitRect(
-                box.origin.x + box.size.width * 0.2f,
-                box.origin.y + box.size.height * 0.2f,
-                box.size.width * 0.6f,
-                box.size.height * 0.6f
-            );
-            m_fields->m_nearbyHazards.push_back(hitRect);
+    void onSwitchReplay(CCObject*) {
+        if (g_afc.inputs.empty()) {
+            loadMacroAndAnalysis(m_level);
         }
+        g_afc.stage = BotStage::Replay;
+        this->resetLevel();
+        refreshHudText();
     }
 
-    bool isTrajectoryPointColliding(CCPoint pt) {
-        if (pt.y < 85.f || pt.y > 2400.f) return true;
-
-        CCRect playerHitbox(pt.x - 8.f, pt.y - 8.f, 16.f, 16.f);
-        for (auto const& hz : m_fields->m_nearbyHazards) {
-            if (playerHitbox.intersectsRect(hz)) {
-                return true;
-            }
+    // Lưu trạng thái Macro tại từng Checkpoint trong Practice Mode
+    CheckpointObject* createCheckpoint() {
+        auto ckpt = PlayLayer::createCheckpoint();
+        if (ckpt && g_afc.enabled && g_afc.stage == BotStage::Record) {
+            g_afc.checkpoints[ckpt] = CheckpointSnapshot{
+                g_afc.currentFrame,
+                g_afc.inputs.size(),
+                g_afc.holdingP1
+            };
         }
-        return false;
+        return ckpt;
     }
 
-    int analyzeTrajectoryFrameWindow(CCPoint actionPos, CCPoint actionVel, bool isClick, double holdDuration, int refFPS) {
-        this->updateNearbyHazards(actionPos);
+    void resetLevel() {
+        this->handleButton(false, 1, true);
+        PlayLayer::resetLevel();
 
-        float dtStep = 1.0f / static_cast<float>(std::max(60, refFPS));
-        float vx = std::max(220.f, actionVel.x);
-        float grav = m_fields->m_gravity;
+        if (!g_afc.isSimulating) {
+            g_afc.whiteTrail.clear();
+        }
 
-        float postActionVy = isClick ? 540.f : std::min(actionVel.y, 120.f);
-        float preActionVy  = actionVel.y;
-
-        int survivingOffsets = 0;
-
-        for (int delta = -12; delta <= 12; ++delta) {
-            if (delta == 0) {
-                survivingOffsets++;
-                continue;
-            }
-
-            bool alive = true;
-            float shiftTime = delta * dtStep;
-
-            CCPoint shiftedStart(
-                actionPos.x + vx * shiftTime,
-                std::max(105.f, actionPos.y + preActionVy * shiftTime + 0.5f * grav * shiftTime * shiftTime)
-            );
-
-            if (delta > 0) {
-                for (int s = 1; s <= delta; ++s) {
-                    float t = s * dtStep;
-                    CCPoint prePt(
-                        actionPos.x + vx * t,
-                        std::max(105.f, actionPos.y + preActionVy * t + 0.5f * grav * t * t)
-                    );
-                    if (this->isTrajectoryPointColliding(prePt)) {
-                        alive = false;
-                        break;
+        if (g_afc.enabled && g_afc.stage == BotStage::Record && !g_afc.isSimulating) {
+            if (m_isPracticeMode && m_checkpointArray && m_checkpointArray->count() > 0) {
+                auto lastCkpt = static_cast<CheckpointObject*>(m_checkpointArray->lastObject());
+                auto it = g_afc.checkpoints.find(lastCkpt);
+                if (it != g_afc.checkpoints.end()) {
+                    g_afc.currentFrame = it->second.frame;
+                    if (g_afc.inputs.size() > it->second.inputCount) {
+                        g_afc.inputs.resize(it->second.inputCount);
                     }
-                }
-            }
-
-            if (alive) {
-                for (int step = 1; step <= 28; ++step) {
-                    float t = step * dtStep;
-                    CCPoint simPt(
-                        shiftedStart.x + vx * t,
-                        std::max(105.f, shiftedStart.y + postActionVy * t + 0.5f * grav * t * t)
-                    );
-                    if (this->isTrajectoryPointColliding(simPt)) {
-                        alive = false;
-                        break;
+                    g_afc.holdingP1 = it->second.holdingP1;
+                    if (g_afc.holdingP1) {
+                        this->handleButton(true, 1, true);
                     }
+                    refreshHudText();
+                    return;
                 }
             }
-
-            if (alive) {
-                survivingOffsets++;
-            }
+            // Nếu reset về 0% (không có checkpoint)
+            g_afc.currentFrame = 0;
+            g_afc.inputs.clear();
+            g_afc.holdingP1 = false;
+            refreshHudText();
+        } else if (!g_afc.isSimulating) {
+            g_afc.currentFrame = 0;
+            g_afc.playbackIndex = 0;
+            g_afc.holdingP1 = false;
         }
-
-        if (!isClick) {
-            int holdFrames = static_cast<int>(std::round(holdDuration * refFPS));
-            if (holdFrames >= 1 && holdFrames <= 12) {
-                survivingOffsets = std::min(survivingOffsets, holdFrames);
-            }
-        }
-
-        return std::clamp(survivingOffsets, 1, 15);
     }
 
-    void drawAheadTrajectory(CCPoint curPos, CCPoint curVel, int refFPS) {
-        if (!m_fields->m_projDrawer) return;
-        m_fields->m_projDrawer->clear();
+    void levelComplete() {
+        PlayLayer::levelComplete();
+        if (!g_afc.enabled || g_afc.isSimulating) return;
 
-        if (!Mod::get()->getSettingValue<bool>("enable-mod")) return;
-        if (!Mod::get()->getSettingValue<bool>("show-ahead-trajectory")) return;
+        // Khi người chơi hoàn thành 100% trong chế độ Record, tự động lưu Macro
+        // và nếu đang để chế độ Auto thì chuyển sang Analyze
+        if (g_afc.stage == BotStage::Record && !g_afc.inputs.empty()) {
+            saveMacroAndAnalysis(m_level);
+        }
+    }
 
-        float dtStep = 1.0f / static_cast<float>(std::max(60, refFPS));
-        float vx = std::max(220.f, curVel.x);
-        float vy = curVel.y;
-        float grav = m_fields->m_gravity;
+    void destroyPlayer(PlayerObject* player, GameObject* object) {
+        if (object == m_anticheatSpike) {
+            PlayLayer::destroyPlayer(player, object);
+            return;
+        }
+        PlayLayer::destroyPlayer(player, object);
 
-        CCPoint prev = curPos;
-        for (int step = 1; step <= 45; ++step) {
-            float t = step * dtStep;
-            CCPoint next(
-                curPos.x + vx * t,
-                std::max(105.f, curPos.y + vy * t + 0.5f * grav * t * t)
-            );
+        if (g_afc.isSimulating && player && player->m_isDead) {
+            g_afc.simDead = true;
+        }
+    }
 
-            bool hit = this->isTrajectoryPointColliding(next);
-            ccColor4F segColor = hit ? ccColor4F{1.f, 0.2f, 0.2f, 0.85f} : ccColor4F{0.35f, 1.f, 0.45f, 0.65f};
-            m_fields->m_projDrawer->drawSegment(prev, next, 1.4f, segColor);
+    // Chạy mô phỏng vật lý thực của game cho một độ lệch frame `delta` (Backward hoặc Forward)
+    TrajectoryBranch simulateShiftedTrajectory(size_t actionIdx, int delta) {
+        TrajectoryBranch branch;
+        branch.delta = delta;
+        branch.survived = true;
 
-            if (hit) {
-                m_fields->m_projDrawer->drawDot(next, 3.8f, {1.f, 0.15f, 0.15f, 0.95f});
+        auto shiftedMacro = makeShiftedMacro(actionIdx, delta);
+        int baseFrame = g_afc.inputs[actionIdx].frame;
+
+        // Xác định mốc frame cần sống sót vượt qua
+        int targetEndFrame = baseFrame + MIN_SURVIVE_FRAMES;
+        if (actionIdx + 1 < g_afc.inputs.size()) {
+            targetEndFrame = std::max(targetEndFrame, g_afc.inputs[actionIdx + 1].frame + 35);
+        }
+        int recordStartFrame = std::max(0, baseFrame - MAX_BACKWARD_FRAMES - 4);
+
+        bool savedPractice = m_isPracticeMode;
+        m_isPracticeMode = false;
+
+        g_afc.isSimulating = true;
+        g_afc.simDead = false;
+        this->resetLevel();
+
+        g_afc.currentFrame = 0;
+        size_t mIdx = 0;
+        float dt = 1.0f / static_cast<float>(g_afc.targetFps);
+
+        while (g_afc.currentFrame <= targetEndFrame) {
+            while (mIdx < shiftedMacro.size() && shiftedMacro[mIdx].frame == g_afc.currentFrame) {
+                this->handleButton(
+                    shiftedMacro[mIdx].down,
+                    shiftedMacro[mIdx].button,
+                    shiftedMacro[mIdx].player1
+                );
+                mIdx++;
+            }
+
+            GJBaseGameLayer::processCommands(dt, false, true);
+
+            if (g_afc.currentFrame >= recordStartFrame && m_player1) {
+                branch.points.push_back(m_player1->getPosition());
+            }
+
+            if (g_afc.simDead || (m_player1 && m_player1->m_isDead)) {
+                branch.survived = false;
                 break;
             }
-            prev = next;
+            if (m_hasCompletedLevel) {
+                branch.survived = true;
+                break;
+            }
+
+            g_afc.currentFrame++;
         }
+
+        this->handleButton(false, 1, true);
+        g_afc.isSimulating = false;
+        m_isPracticeMode = savedPractice;
+
+        return branch;
+    }
+
+    // Thực hiện Backward Check + Forward Check cho thao tác thứ `actionIdx`
+    void analyzeSingleMacroAction(size_t actionIdx) {
+        if (actionIdx >= g_afc.inputs.size()) return;
+
+        g_afc.activeBranches.clear();
+        int origFrame = g_afc.inputs[actionIdx].frame;
+        int prevActionFrame = (actionIdx > 0) ? g_afc.inputs[actionIdx - 1].frame : -1;
+        int nextActionFrame = (actionIdx + 1 < g_afc.inputs.size())
+                              ? g_afc.inputs[actionIdx + 1].frame
+                              : (origFrame + MAX_FORWARD_FRAMES + 10);
+
+        // 1. Mô phỏng tại đúng frame gốc của Macro (delta = 0)
+        g_afc.activeBranches.push_back(simulateShiftedTrajectory(actionIdx, 0));
+
+        // 2. Backward Frame Check: Lùi từng frame về phía trước thời điểm bấm của Macro
+        int backwardValid = 0;
+        for (int b = 1; b <= MAX_BACKWARD_FRAMES; b++) {
+            if (origFrame - b <= prevActionFrame) break;
+            auto br = simulateShiftedTrajectory(actionIdx, -b);
+            bool ok = br.survived;
+            g_afc.activeBranches.push_back(std::move(br));
+            if (ok) {
+                backwardValid++;
+            } else {
+                break; // Dừng đếm khi chạm ranh giới frame chết phía trước
+            }
+        }
+
+        // 3. Forward Frame Check: Tiến từng frame về phía sau thời điểm bấm của Macro
+        int forwardValid = 0;
+        for (int f = 1; f <= MAX_FORWARD_FRAMES; f++) {
+            if (origFrame + f >= nextActionFrame && !g_afc.inputs[actionIdx].down) break;
+            auto br = simulateShiftedTrajectory(actionIdx, +f);
+            bool ok = br.survived;
+            g_afc.activeBranches.push_back(std::move(br));
+            if (ok) {
+                forwardValid++;
+            } else {
+                break; // Dừng đếm khi chạm ranh giới frame chết phía sau
+            }
+        }
+
+        // Công thức: Tổng số Frame của Click/Release = 1 (Macro gốc) + Backward khả thi + Forward khả thi
+        int totalWindow = 1 + backwardValid + forwardValid;
+
+        auto& act = g_afc.inputs[actionIdx];
+        act.analyzed = true;
+        act.backwardFrames = backwardValid;
+        act.forwardFrames = forwardValid;
+        act.windowSize = totalWindow;
+
+        int bucket = (totalWindow > MAX_BUCKET) ? (MAX_BUCKET + 1) : totalWindow;
+        g_afc.tally[bucket]++;
+    }
+
+    void triggerActionFeedback(const MacroInput& act) {
+        g_afc.lastPopupText = fmt::format(
+            "{}F ({}: 1 + {}B + {}A)",
+            act.windowSize,
+            act.down ? "CLICK" : "REL",
+            act.backwardFrames,
+            act.forwardFrames
+        );
+        g_afc.popupTimer = 95;
+
+        if (g_afc.playerPopupLabel && m_player1) {
+            g_afc.playerPopupLabel->setString(fmt::format("{}F", act.windowSize).c_str());
+            g_afc.playerPopupLabel->setPosition({
+                m_player1->getPositionX(),
+                m_player1->getPositionY() + 28.f
+            });
+            g_afc.playerPopupLabel->setVisible(true);
+        }
+
+        if (Mod::get()->getSettingValue<bool>("enable-sound")) {
+            FMODAudioEngine::sharedEngine()->playEffect("crystal01.ogg");
+        }
+    }
+
+    void pollCustomShortcutKeys() {
+#ifdef GEODE_IS_WINDOWS
+        static bool prevToggle = false, prevMode = false, prevTraj = false, prevReset = false;
+
+        int vkToggle = parseCustomKeyString(Mod::get()->getSettingValue<std::string>("toggle-key"));
+        int vkMode   = parseCustomKeyString(Mod::get()->getSettingValue<std::string>("mode-key"));
+        int vkTraj   = parseCustomKeyString(Mod::get()->getSettingValue<std::string>("trajectory-key"));
+        int vkReset  = parseCustomKeyString(Mod::get()->getSettingValue<std::string>("reset-key"));
+
+        bool curToggle = vkToggle ? ((GetAsyncKeyState(vkToggle) & 0x8000) != 0) : false;
+        bool curMode   = vkMode   ? ((GetAsyncKeyState(vkMode)   & 0x8000) != 0) : false;
+        bool curTraj   = vkTraj   ? ((GetAsyncKeyState(vkTraj)   & 0x8000) != 0) : false;
+        bool curReset  = vkReset  ? ((GetAsyncKeyState(vkReset)  & 0x8000) != 0) : false;
+
+        if (curToggle && !prevToggle) {
+            g_afc.enabled = !g_afc.enabled;
+            Mod::get()->setSettingValue<bool>("enable-mod", g_afc.enabled);
+            refreshHudText();
+        }
+        if (g_afc.enabled) {
+            if (curMode && !prevMode) {
+                if (g_afc.stage == BotStage::Record) {
+                    saveMacroAndAnalysis(m_level);
+                    this->onSwitchAnalyze(nullptr);
+                } else if (g_afc.stage == BotStage::Analyze) {
+                    this->onSwitchReplay(nullptr);
+                } else {
+                    this->onSwitchRecord(nullptr);
+                }
+            }
+            if (curTraj && !prevTraj) {
+                g_afc.showAheadTraj = !g_afc.showAheadTraj;
+                Mod::get()->setSettingValue<bool>("show-ahead-trajectory", g_afc.showAheadTraj);
+            }
+            if (curReset && !prevReset) {
+                auto path = getLevelDataPath(m_level);
+                if (std::filesystem::exists(path)) {
+                    std::filesystem::remove(path);
+                }
+                g_afc.inputs.clear();
+                g_afc.activeBranches.clear();
+                std::fill(std::begin(g_afc.tally), std::end(g_afc.tally), 0);
+                refreshHudText();
+            }
+        }
+
+        prevToggle = curToggle;
+        prevMode   = curMode;
+        prevTraj   = curTraj;
+        prevReset  = curReset;
+#endif
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
+        if (g_afc.isSimulating) return;
 
-        if (!this->m_player1) return;
-        m_fields->m_elapsedTime += dt;
+        pollCustomShortcutKeys();
+        if (!g_afc.enabled) return;
 
-        CCPoint curPos = this->m_player1->getPosition();
+        // Nếu đang ở chế độ Analyze và còn thao tác chưa phân tích:
+        // phân tích từng thao tác một rồi chuyển sang phát lại mượt mà
+        if (g_afc.stage == BotStage::Analyze) {
+            if (g_afc.analyzeActionIdx < g_afc.inputs.size()) {
+                analyzeSingleMacroAction(g_afc.analyzeActionIdx);
+                g_afc.analyzeActionIdx++;
+                refreshHudText();
 
-        if (m_fields->m_hasPrevPos && dt > 0.0001f) {
-            float newVx = (curPos.x - m_fields->m_prevPos.x) / dt;
-            float newVy = (curPos.y - m_fields->m_prevPos.y) / dt;
-            if (newVx > 10.f) m_fields->m_vel.x = newVx;
-            m_fields->m_vel.y = newVy;
-        }
-        m_fields->m_prevPos = curPos;
-        m_fields->m_hasPrevPos = true;
-
-        if (!Mod::get()->getSettingValue<bool>("enable-mod")) return;
-
-        if (Mod::get()->getSettingValue<bool>("show-white-trail") && m_fields->m_trailDrawer) {
-            if (m_fields->m_trailPoints.empty() || ccpDistance(m_fields->m_trailPoints.back(), curPos) >= 2.5f) {
-                if (m_fields->m_trailPoints.size() > 1) {
-                    CCPoint lastPt = m_fields->m_trailPoints.back();
-                    if (std::abs(curPos.x - lastPt.x) < 60.f && std::abs(curPos.y - lastPt.y) < 60.f) {
-                        m_fields->m_trailDrawer->drawSegment(lastPt, curPos, 2.8f, {0.f, 0.f, 0.f, 0.65f});
-                        m_fields->m_trailDrawer->drawSegment(lastPt, curPos, 1.9f, {1.f, 1.f, 1.f, 0.95f});
-                    }
+                if (g_afc.analyzeActionIdx >= g_afc.inputs.size()) {
+                    g_afc.analysisCompleted = true;
+                    saveMacroAndAnalysis(m_level);
+                    g_afc.stage = BotStage::Replay;
+                    this->resetLevel();
                 }
-                m_fields->m_trailPoints.push_back(curPos);
+                return;
+            } else {
+                g_afc.stage = BotStage::Replay;
+                this->resetLevel();
             }
         }
 
-        m_fields->m_hazardUpdateTick++;
-        if (m_fields->m_hazardUpdateTick >= 8) {
-            m_fields->m_hazardUpdateTick = 0;
-            this->updateNearbyHazards(curPos);
-        }
-        int refFPS = static_cast<int>(Mod::get()->getSettingValue<int64_t>("target-fps"));
-        this->drawAheadTrajectory(curPos, m_fields->m_vel, refFPS);
-
-        for (auto& pt : m_fields->m_savedPoints) {
-            if (!pt.triggered && curPos.x >= pt.x - 2.0f) {
-                pt.triggered = true;
-                this->spawnWorldMarker(ccp(pt.x, pt.y), pt.frames);
-                this->incrementTierCount(pt.frames);
+        if (g_afc.popupTimer > 0) {
+            g_afc.popupTimer--;
+            if (g_afc.popupTimer == 0 && g_afc.playerPopupLabel) {
+                g_afc.playerPopupLabel->setVisible(false);
             }
         }
-    }
 
-    void resetLevel() {
-        PlayLayer::resetLevel();
-
-        m_fields->m_isHolding = false;
-        m_fields->m_hasPrevPos = false;
-        m_fields->m_trailPoints.clear();
-
-        for (int i = 0; i < 7; ++i) {
-            m_fields->m_tierCounts[i] = 0;
-        }
-        for (auto& pt : m_fields->m_savedPoints) {
-            pt.triggered = false;
-        }
-
-        if (m_fields->m_trailDrawer) m_fields->m_trailDrawer->clear();
-        if (m_fields->m_projDrawer) m_fields->m_projDrawer->clear();
-        if (m_fields->m_ringDrawer) m_fields->m_ringDrawer->clear();
-        if (m_fields->m_worldTextContainer) m_fields->m_worldTextContainer->removeAllChildren();
-
-        this->refreshBoardUI();
-    }
-
-    void clearSavedLevelData() {
-        m_fields->m_savedPoints.clear();
-        std::error_code ec;
-        std::filesystem::remove(this->getLevelMacroFilePath(), ec);
-
-        for (int i = 0; i < 7; ++i) {
-            m_fields->m_tierCounts[i] = 0;
-        }
-        if (m_fields->m_ringDrawer) m_fields->m_ringDrawer->clear();
-        if (m_fields->m_worldTextContainer) m_fields->m_worldTextContainer->removeAllChildren();
-        this->refreshBoardUI();
+        renderWorldTrajectories(this);
+        refreshHudText();
     }
 };
 
-class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
+class $modify(AFCGameLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
+        auto pl = PlayLayer::get();
+        if (pl && g_afc.enabled && !g_afc.isSimulating && g_afc.stage == BotStage::Record) {
+            if (isPlayer1) g_afc.holdingP1 = down;
+            CCPoint pos = pl->m_player1 ? pl->m_player1->getPosition() : CCPoint{0.f, 0.f};
+            g_afc.inputs.push_back(MacroInput{
+                g_afc.currentFrame,
+                down,
+                button,
+                isPlayer1,
+                pos.x,
+                pos.y,
+                false, 0, 0, 1
+            });
+        }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
-
-        if (button != 1 || !isPlayer1) return;
-
-        auto playLayer = PlayLayer::get();
-        if (!playLayer || playLayer != static_cast<GJBaseGameLayer*>(this)) return;
-        if (!Mod::get()->getSettingValue<bool>("enable-mod")) return;
-
-        auto afcLayer = static_cast<AFCPlayLayer*>(playLayer);
-        auto fields = afcLayer->m_fields.self();
-
-        std::string mode = Mod::get()->getSettingValue<std::string>("work-mode");
-        bool canAnalyzeAndRecord = (mode != "Replay Saved Data Only");
-
-        int refFPS = static_cast<int>(Mod::get()->getSettingValue<int64_t>("target-fps"));
-
-        if (down) {
-            fields->m_isHolding = true;
-            fields->m_pressStartTime = fields->m_elapsedTime;
-            if (playLayer->m_player1) {
-                fields->m_pressPos = playLayer->m_player1->getPosition();
-                fields->m_pressVel = fields->m_vel;
-            }
-
-            if (canAnalyzeAndRecord && playLayer->m_player1) {
-                for (auto const& existing : fields->m_savedPoints) {
-                    if (std::abs(existing.x - fields->m_pressPos.x) < 10.f) {
-                        return;
-                    }
-                }
-
-                int frames = afcLayer->analyzeTrajectoryFrameWindow(
-                    fields->m_pressPos, fields->m_pressVel, true, 0.0, refFPS
-                );
-
-                if (frames <= 12) {
-                    FramePointData newPt{
-                        fields->m_pressPos.x,
-                        fields->m_pressPos.y,
-                        frames,
-                        true,
-                        true
-                    };
-                    fields->m_savedPoints.push_back(newPt);
-                    afcLayer->saveMacroFramesToDisk();
-
-                    afcLayer->spawnWorldMarker(fields->m_pressPos, frames);
-                    afcLayer->incrementTierCount(frames);
-                }
-            }
-        } else if (fields->m_isHolding) {
-            fields->m_isHolding = false;
-            double holdDuration = fields->m_elapsedTime - fields->m_pressStartTime;
-
-            if (canAnalyzeAndRecord && playLayer->m_player1) {
-                CCPoint releasePos = playLayer->m_player1->getPosition();
-
-                int holdFrames = static_cast<int>(std::round(holdDuration * refFPS));
-                int releaseFrames = afcLayer->analyzeTrajectoryFrameWindow(
-                    releasePos, fields->m_vel, false, holdDuration, refFPS
-                );
-                int finalFrames = std::min(holdFrames, releaseFrames);
-                if (finalFrames < 1) finalFrames = 1;
-
-                for (auto& existing : fields->m_savedPoints) {
-                    if (std::abs(existing.x - releasePos.x) < 14.f) {
-                        return;
-                    }
-                }
-
-                if (finalFrames <= 12) {
-                    FramePointData newPt{
-                        releasePos.x,
-                        releasePos.y,
-                        finalFrames,
-                        false,
-                        true
-                    };
-                    fields->m_savedPoints.push_back(newPt);
-                    afcLayer->saveMacroFramesToDisk();
-
-                    afcLayer->spawnWorldMarker(releasePos, finalFrames);
-                    afcLayer->incrementTierCount(finalFrames);
-                }
-            }
-        }
     }
-};
 
-class $modify(AFCUILayer, UILayer) {
-    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
-        UILayer::keyDown(key, timestamp);
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        auto pl = static_cast<AFCPlayLayer*>(PlayLayer::get());
+        if (pl && g_afc.enabled && !g_afc.isSimulating) {
+            // Phát lại chính xác từng frame trong chế độ Replay
+            if (g_afc.stage == BotStage::Replay) {
+                while (g_afc.playbackIndex < g_afc.inputs.size() &&
+                       g_afc.inputs[g_afc.playbackIndex].frame == g_afc.currentFrame) {
+                    const auto& act = g_afc.inputs[g_afc.playbackIndex];
+                    GJBaseGameLayer::handleButton(act.down, act.button, act.player1);
+                    if (act.analyzed) {
+                        pl->triggerActionFeedback(act);
+                    }
+                    g_afc.playbackIndex++;
+                }
+            }
 
-        if (key == cocos2d::KEY_None) return;
+            // Lưu tọa độ thật của nhân vật mỗi tick để vẽ đường White Trajectory Arc
+            if (pl->m_player1 && !pl->m_player1->m_isDead) {
+                g_afc.whiteTrail.push_back(pl->m_player1->getPosition());
+                if (g_afc.whiteTrail.size() > WHITE_TRAIL_MAX_PTS) {
+                    g_afc.whiteTrail.pop_front();
+                }
+            }
 
-        auto playLayer = PlayLayer::get();
-        if (!playLayer) return;
-
-        auto afcLayer = static_cast<AFCPlayLayer*>(playLayer);
-
-        auto toggleKey = stringToKeyCode(Mod::get()->getSettingValue<std::string>("toggle-key"));
-        auto trajKey   = stringToKeyCode(Mod::get()->getSettingValue<std::string>("trajectory-key"));
-        auto resetKey  = stringToKeyCode(Mod::get()->getSettingValue<std::string>("reset-key"));
-
-        if (key == toggleKey) {
-            bool cur = Mod::get()->getSettingValue<bool>("enable-mod");
-            Mod::get()->setSettingValue("enable-mod", !cur);
-            afcLayer->refreshBoardUI();
-        } else if (key == trajKey) {
-            bool cur = Mod::get()->getSettingValue<bool>("show-ahead-trajectory");
-            Mod::get()->setSettingValue("show-ahead-trajectory", !cur);
-        } else if (key == resetKey) {
-            afcLayer->clearSavedLevelData();
+            g_afc.currentFrame++;
         }
+
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 };
