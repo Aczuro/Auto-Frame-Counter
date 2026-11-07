@@ -1,14 +1,64 @@
 #pragma once
 #include <Geode/Geode.hpp>
 #include <vector>
+#include <type_traits>
 
 using namespace geode::prelude;
 
-// Lưu trạng thái của từng GameObject / EnhancedGameObject (Orb, Pad, Portal, Trigger)
+namespace afc::detail {
+    // C++20 concept-based SFINAE adapters to remain compatible across Geode bindings
+    // (e.g., m_yVelocity vs m_yAccel, m_xVelocity vs m_xAccel / m_platformerXVelocity)
+    inline double getPlayerYVelocity(PlayerObject* p) {
+        if (!p) return 0.0;
+        if constexpr (requires { p->m_yVelocity; }) {
+            return static_cast<double>(p->m_yVelocity);
+        } else if constexpr (requires { p->m_yAccel; }) {
+            return static_cast<double>(p->m_yAccel);
+        }
+        return 0.0;
+    }
+
+    inline void setPlayerYVelocity(PlayerObject* p, double val) {
+        if (!p) return;
+        if constexpr (requires { p->m_yVelocity; }) {
+            p->m_yVelocity = val;
+        }
+        if constexpr (requires { p->m_yAccel; }) {
+            p->m_yAccel = val;
+        }
+    }
+
+    inline double getPlayerXVelocity(PlayerObject* p) {
+        if (!p) return 0.0;
+        if constexpr (requires { p->m_xVelocity; }) {
+            return static_cast<double>(p->m_xVelocity);
+        } else if constexpr (requires { p->m_platformerXVelocity; }) {
+            return static_cast<double>(p->m_platformerXVelocity);
+        } else if constexpr (requires { p->m_xAccel; }) {
+            return static_cast<double>(p->m_xAccel);
+        }
+        return 0.0;
+    }
+
+    inline void setPlayerXVelocity(PlayerObject* p, double val) {
+        if (!p) return;
+        if constexpr (requires { p->m_xVelocity; }) {
+            p->m_xVelocity = val;
+        }
+        if constexpr (requires { p->m_platformerXVelocity; }) {
+            p->m_platformerXVelocity = val;
+        }
+        if constexpr (requires { p->m_xAccel; }) {
+            p->m_xAccel = val;
+        }
+    }
+} // namespace afc::detail
+
+// Struct lưu thông tin trạng thái của các GameObject tương tác (Orbs, Pads, Portals, Triggers)
 struct ObjectStateSnapshot {
     GameObject* obj = nullptr;
-    CCPoint pos{0.f, 0.f};
-    CCPoint startPos{0.f, 0.f};
+    CCPoint pos;
+    CCPoint startPos;
     float rotX = 0.f;
     float rotY = 0.f;
     float scaleX = 1.f;
@@ -17,39 +67,51 @@ struct ObjectStateSnapshot {
     GLubyte opacity = 255;
     bool isDisabled = false;
     bool isDisabled2 = false;
-    bool isEnhanced = false;
-    bool activatedP1 = false;
-    bool activatedP2 = false;
+    bool hasBeenActivated = false;
+    bool hasBeenActivatedP2 = false;
 
     static ObjectStateSnapshot capture(GameObject* o);
     void restore() const;
 };
 
-// Lưu toàn bộ biến trạng thái vật lý của PlayerObject theo kiến trúc Silicate PracticeFix
-struct SilicatePlayerState {
-    bool valid = false;
+// Cấu trúc GameStateSnapshot toàn diện đóng băng trạng thái vật lý của PlayerObject
+// Tham chiếu mô hình State Management của Silicate / yBot / Echo
+struct GameStateSnapshot {
+    // Vị trí không gian & toạ độ nội bộ
     CCPoint pos{0.f, 0.f};
+    CCPoint prevPos{0.f, 0.f};
+    CCPoint realPos{0.f, 0.f};
     CCPoint lastPos{0.f, 0.f};
-    CCPoint lastGroundedPos{0.f, 0.f};
+
+    // Vận tốc & gia tốc vật lý (m_yVelocity, m_xVelocity, m_playerSpeed)
+    double m_yVelocity = 0.0;
+    double m_xVelocity = 0.0;
+    float playerSpeed = 0.9f;
     float rotation = 0.f;
     float rotationSpeed = 0.f;
 
-    double yVel = 0.0;
-    double platXVel = 0.0;
+    // Trọng lực, kích thước (Mini/Normal) và trạng thái Ngửa/Sấp (m_isUpsideDown)
     double gravity = 0.958199;
-    double fallSpeed = 0.0;
     float gravityMod = 1.0f;
-    float speed = 0.9f;
     float vehicleSize = 1.0f;
+    float spriteScaleX = 1.0f;
+    float spriteScaleY = 1.0f;
+    bool m_isUpsideDown = false;
 
-    // Trạng thái mặt đất & dốc nghiêng (Slope)
-    bool onGround = false;
-    bool onGround2 = false;
-    bool onGround3 = false;
-    bool onGround4 = false;
+    // Trạng thái sinh tử & tiếp đất
+    bool m_isDead = false;
+    bool isGrounded = false;
+    bool isJumping = false;
+    bool isHolding = false;
+    bool isSliding = false;
+    bool isDashing = false;
+    double fallSpeed = 0.0;
+
+    // Trạng thái mặt phẳng nghiêng (Slope Physics)
     bool isOnSlope = false;
     bool wasOnSlope = false;
     float slopeAngle = 0.f;
+    double slopeStartTime = 0.0;
 
     // Trạng thái Dash Orb & Ring Jump
     bool dashing = false;
@@ -60,13 +122,14 @@ struct SilicatePlayerState {
     bool ringJumpRelated = false;
     int stateRingJump = 0;
 
-    // Trạng thái Input & Robot
+    // Trạng thái Input Buffer & Robot/UFO/Spider
     bool jumpBuffered = false;
     bool wasRobotJump = false;
-    bool holdingBtn1 = false;
+    double robotJumpTime = 0.0;
+    bool holdingRight = false;
+    bool holdingLeft = false;
 
-    // Hướng & Gamemode
-    bool upsideDown = false;
+    // Hướng di chuyển & Gamemode hiện tại
     bool goingLeft = false;
     bool sideways = false;
     bool isShip = false;
@@ -81,7 +144,10 @@ struct SilicatePlayerState {
     void restoreTo(PlayerObject* p) const;
 };
 
-// Gói đóng băng toàn diện PlayLayer tại 1 frame
+// Alias giữ tương thích ngược với mã nguồn cũ
+using SilicatePlayerState = GameStateSnapshot;
+
+// Gói đóng băng toàn diện PlayLayer + GJGameState + 2 PlayerObject tại 1 frame vật lý cố định
 struct FullPlayLayerSnapshot {
     bool valid = false;
     int frame = 0;
@@ -89,18 +155,17 @@ struct FullPlayLayerSnapshot {
     bool holdingP1 = false;
     bool holdingP2 = false;
 
-    Ref<CheckpointObject> engineCkpt = nullptr;
-    SilicatePlayerState p1State;
-    SilicatePlayerState p2State;
-    std::vector<ObjectStateSnapshot> activeObjects;
+    // Trạng thái tổng thể của GJBaseGameLayer::m_gameState (Camera, Dual, TimeWarp, Seed)
+    GJGameState savedGameState{};
+    bool isDualMode = false;
 
-    static FullPlayLayerSnapshot capture(
-        PlayLayer* pl,
-        int curFrame,
-        size_t mIdx,
-        bool hold1,
-        bool hold2,
-        bool createNativeCkpt
-    );
-    void restore(PlayLayer* pl) const;
+    Ref<CheckpointObject> engineCkpt = nullptr;
+    GameStateSnapshot p1State;
+    GameStateSnapshot p2State;
+
+    std::vector<ObjectStateSnapshot> touchedObjects;
+
+    void clear();
+    bool capture(PlayLayer* pl, int exactPhysicsFrame, size_t mIdx, bool hP1, bool hP2);
+    bool restore(PlayLayer* pl) const;
 };
