@@ -8,55 +8,67 @@
     },
     "id": "roper.afc",
     "name": "Auto Frame Counter",
-    "version": "v1.0.0-alpha.1",
+    "version": "v1.0.0-alpha.3",
     "developer": "Roper",
-    "description": "Auto counter frame window with NanGD style visual and sound effects.",
+    "description": "NanGD Frame Counter with Trajectory Analyzer & Macro Replay data.",
     "settings": {
         "enable-mod": {
             "name": "Enable Mod",
-            "description": "Bat hoac tat toan bo chuc nang cua mod.",
+            "description": "Bat hoac tat toan bo hien thi cua mod.",
             "type": "bool",
             "default": true
         },
-        "toggle-key": {
-            "name": "PC Toggle Keybind",
-            "description": "Phim tat tren PC de Bat/Tat nhanh mod khi dang choi.",
+        "work-mode": {
+            "name": "Macro Mode",
+            "description": "Auto: Vua quet Trajectory khi chay macro vua luu lai. Replay Only: Chi phat lai du lieu frame da luu.",
             "type": "string",
-            "default": "C",
-            "one-of": ["C", "F", "V", "X", "Z", "Tab", "F1", "F2"]
+            "default": "Auto (Analyze + Replay)",
+            "one-of": [
+                "Auto (Analyze + Replay)",
+                "Replay Saved Data Only"
+            ]
         },
-        "reset-key": {
-            "name": "PC Reset Counter Keybind",
-            "description": "Phim tat tren PC de reset bo dem Frame.",
-            "type": "string",
-            "default": "R",
-            "one-of": ["R", "T", "G", "B", "F3", "F4"]
+        "show-white-trail": {
+            "name": "Show White Trajectory Arc",
+            "description": "Ve duong quy dao mau trang di theo nhan vat nhu trong video NanGD.",
+            "type": "bool",
+            "default": true
+        },
+        "show-ahead-trajectory": {
+            "name": "Show Ahead Trajectory (Preview)",
+            "description": "Hien thi duong du doan quy dao bay va diem va cham phia truoc nhan vat.",
+            "type": "bool",
+            "default": true
         },
         "target-fps": {
             "name": "Reference FPS",
-            "description": "Moc FPS dung de tinh do hep cua Frame Window.",
+            "description": "Moc FPS dung de tinh Trajectory Frame Window (Mac dinh: 240).",
             "type": "int",
             "default": 240,
             "min": 60,
             "max": 1000
         },
-        "max-frame-display": {
-            "name": "Max Frame Threshold",
-            "description": "Chi hien thi cac pha nhay co cua so hep hon hoac bang so frame nay.",
-            "type": "int",
-            "default": 6,
-            "min": 1,
-            "max": 15
+        "toggle-key": {
+            "name": "Custom Toggle Mod Key",
+            "description": "Tu nhap phim bat/tat mod (VD: A-Z, 0-9, F1-F12, Tab, Shift, Ctrl, Alt, Space...).",
+            "type": "string",
+            "default": "C"
         },
-        "show-world-text": {
-            "name": "NanGD In-Level Popup",
-            "description": "Hien chu so Frame co mau ngay tai vi tri nhan vat nhay tren man choi.",
-            "type": "bool",
-            "default": true
+        "trajectory-key": {
+            "name": "Custom Trajectory Preview Key",
+            "description": "Tu nhap phim bat/tat duong du doan quy dao (VD: T, G, F2, Shift...).",
+            "type": "string",
+            "default": "T"
+        },
+        "reset-key": {
+            "name": "Custom Clear Level Data Key",
+            "description": "Tu nhap phim xoa du lieu Frame da luu cua level hien tai (VD: R, P, F4, Backspace...).",
+            "type": "string",
+            "default": "R"
         },
         "enable-sound": {
-            "name": "NanGD Hit Sound",
-            "description": "Phat am thanh khi qua mot Frame Window.",
+            "name": "Enable Hit Sound",
+            "description": "Phat am thanh khi di qua diem Frame Window.",
             "type": "bool",
             "default": true
         },
