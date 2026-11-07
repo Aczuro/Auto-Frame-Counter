@@ -19,7 +19,7 @@ using namespace geode::prelude;
 constexpr int MAX_BACKWARD_FRAMES   = 12;  // Số frame tối đa quét lùi trước mỗi Press/Release
 constexpr int MAX_FORWARD_FRAMES    = 12;  // Số frame tối đa quét tiến sau mỗi Press/Release
 constexpr int SURVIVE_CHECK_FRAMES  = 72;  // Số frame nhân vật phải sống sót sau thao tác
-constexpr int ACTIONS_PER_UI_TICK   = 3;   // Số action quét cuốn chiếu mỗi frame hình ảnh (tránh treo game)
+constexpr int ACTIONS_PER_UI_TICK   = 3;   // Số action quét cuốn chiếu mỗi frame hình ảnh
 constexpr int PREVIEW_STEPS         = 110; // Độ dài đường dự đoán Ahead Trajectory
 constexpr int WHITE_TRAIL_MAX_PTS   = 180; // Độ dài đường quỹ đạo trắng (White Trajectory Arc)
 constexpr int MAX_BUCKET            = 10;  // Thống kê từ 1F đến 10F và 11F+
@@ -66,7 +66,6 @@ struct MacroAction {
 // HỆ THỐNG SAVE / LOAD STATE 3 TẦNG CHỐNG DESYNC (PLAYER + ORB/PORTAL + TRIGGER)
 // ============================================================================
 
-// Helper C++20 kiểm tra biến thành viên an toàn tại thời điểm biên dịch
 template <typename T>
 static void readEnhancedFlags(T* obj, bool& act1, bool& act2) {
     if constexpr (requires { obj->m_hasBeenActivated; }) {
@@ -96,6 +95,38 @@ static void clearPlayerRingTouchState(P* p) {
     }
     if constexpr (requires { p->m_jumpBuffered = false; }) {
         p->m_jumpBuffered = false;
+    }
+}
+
+// Đọc/ghi tự động các biến phụ thuộc phiên bản GD 2.2081 của PlayerObject
+template <typename P, typename Snap>
+static void capturePlayerExtraFields(P* p, Snap& s) {
+    if constexpr (requires { p->m_wasRobotJump; }) s.wasRobotJump = p->m_wasRobotJump;
+    if constexpr (requires { p->m_canRobotJump; }) s.canRobotJump = p->m_canRobotJump;
+    if constexpr (requires { p->m_jumpBuffered; }) s.jumpBuffered = p->m_jumpBuffered;
+    if constexpr (requires { p->m_isHolding; })    s.holding      = p->m_isHolding;
+    if constexpr (requires { p->m_isHolding2; })   s.holding2     = p->m_isHolding2;
+    if constexpr (requires { p->m_hasJustHeld; })  s.hasJustHeld  = p->m_hasJustHeld;
+    if constexpr (requires { p->m_hasJustHeld2; }) s.hasJustHeld2 = p->m_hasJustHeld2;
+    if constexpr (requires { p->m_fallSpeed; })    s.fallSpeed    = p->m_fallSpeed;
+    if constexpr (requires { p->m_holdingButtons[1]; }) {
+        auto it = p->m_holdingButtons.find(1);
+        if (it != p->m_holdingButtons.end()) s.holdingBtn1 = it->second;
+    }
+}
+
+template <typename P, typename Snap>
+static void restorePlayerExtraFields(P* p, const Snap& s) {
+    if constexpr (requires { p->m_wasRobotJump; }) p->m_wasRobotJump = s.wasRobotJump;
+    if constexpr (requires { p->m_canRobotJump; }) p->m_canRobotJump = s.canRobotJump;
+    if constexpr (requires { p->m_jumpBuffered; }) p->m_jumpBuffered = s.jumpBuffered;
+    if constexpr (requires { p->m_isHolding; })    p->m_isHolding    = s.holding;
+    if constexpr (requires { p->m_isHolding2; })   p->m_isHolding2   = s.holding2;
+    if constexpr (requires { p->m_hasJustHeld; })  p->m_hasJustHeld  = s.hasJustHeld;
+    if constexpr (requires { p->m_hasJustHeld2; }) p->m_hasJustHeld2 = s.hasJustHeld2;
+    if constexpr (requires { p->m_fallSpeed; })    p->m_fallSpeed    = s.fallSpeed;
+    if constexpr (requires { p->m_holdingButtons[1]; }) {
+        p->m_holdingButtons[1] = s.holdingBtn1;
     }
 }
 
@@ -140,8 +171,8 @@ struct ObjectStateEntry {
     void restore() const {
         if (!obj) return;
 
-        // Nếu vật thể (Orb, Pad, Portal, Trigger, Coin) chưa kích hoạt ở frame gốc
-        // nhưng bị kích hoạt trong nhánh thử nghiệm -> gọi resetObject() để xóa sạch trạng thái kích hoạt!
+        // Nếu Orb, Pad, Portal hoặc Trigger chưa kích hoạt ở frame gốc
+        // nhưng bị kích hoạt trong nhánh thử nghiệm -> gọi resetObject() để khôi phục trạng thái!
         if (!hasBeenActivatedP1 && !hasBeenActivatedP2) {
             obj->resetObject();
         }
@@ -165,7 +196,7 @@ struct ObjectStateEntry {
     }
 };
 
-// Tầng 3: Snapshot toàn diện cho PlayerObject (P1 & P2)
+// Tầng 3: Snapshot toàn diện cho PlayerObject (P1 & P2) trên GD 2.2081
 struct PlayerExactSnapshot {
     bool valid = false;
     CCPoint pos{0.f, 0.f};
@@ -173,6 +204,7 @@ struct PlayerExactSnapshot {
     double yVel = 0.0;
     double platXVel = 0.0;
     double gravity = 0.958199;
+    double fallSpeed = 0.0;
     float gravityMod = 1.0f;
     float speed = 0.9f;
     float vehicleSize = 1.0f;
@@ -186,6 +218,9 @@ struct PlayerExactSnapshot {
     bool holding2 = false;
     bool hasJustHeld = false;
     bool hasJustHeld2 = false;
+    bool holdingBtn1 = false;
+    bool jumpBuffered = false;
+    bool wasRobotJump = false;
     bool canRobotJump = false;
 
     bool isShip = false;
@@ -214,11 +249,6 @@ struct PlayerExactSnapshot {
         s.goingLeft    = p->m_isGoingLeft;
         s.sideways     = p->m_isSideways;
         s.dashing      = p->m_isDashing;
-        s.holding      = p->m_isHolding;
-        s.holding2     = p->m_isHolding2;
-        s.hasJustHeld  = p->m_hasJustHeld;
-        s.hasJustHeld2 = p->m_hasJustHeld2;
-        s.canRobotJump = p->m_canRobotJump;
 
         s.isShip       = p->m_isShip;
         s.isUfo        = p->m_isBird;
@@ -227,6 +257,8 @@ struct PlayerExactSnapshot {
         s.isRobot      = p->m_isRobot;
         s.isSpider     = p->m_isSpider;
         s.isSwing      = p->m_isSwing;
+
+        capturePlayerExtraFields(p, s);
         return s;
     }
 
@@ -248,11 +280,6 @@ struct PlayerExactSnapshot {
         p->m_isGoingLeft         = goingLeft;
         p->m_isSideways          = sideways;
         p->m_isDashing           = dashing;
-        p->m_isHolding           = holding;
-        p->m_isHolding2          = holding2;
-        p->m_hasJustHeld         = hasJustHeld;
-        p->m_hasJustHeld2        = hasJustHeld2;
-        p->m_canRobotJump        = canRobotJump;
 
         p->m_isShip              = isShip;
         p->m_isBird              = isUfo;
@@ -262,7 +289,9 @@ struct PlayerExactSnapshot {
         p->m_isSpider            = isSpider;
         p->m_isSwing             = isSwing;
 
-        if (!holding) {
+        restorePlayerExtraFields(p, *this);
+
+        if (!holding && !holdingBtn1) {
             clearPlayerRingTouchState(p);
         }
     }
@@ -343,6 +372,12 @@ struct PlayLayerStateSnapshot {
         // 3. Khôi phục chính xác vị trí, vận tốc, trạng thái giữ chuột và vòng Orb của Player 1 & Player 2
         p1Snap.restore(pl->m_player1);
         p2Snap.restore(pl->m_player2);
+
+        // Đồng bộ trạng thái giữ phím ở tầng GJBaseGameLayer
+        pl->handleButton(holdingP1, 1, true);
+        if (pl->m_player2) {
+            pl->handleButton(holdingP2, 1, false);
+        }
     }
 };
 
@@ -429,7 +464,6 @@ static void saveMacroToJson(GJGameLevel* level) {
     out << "  \"analyzed\": " << (g_afc.analysisCompleted ? "true" : "false") << ",\n";
     out << "  \"total_actions\": " << g_afc.actions.size() << ",\n";
 
-    // Ghi thống kê Tally
     out << "  \"tally\": {\n";
     for (int w = 1; w <= MAX_BUCKET; w++) {
         out << "    \"" << w << "F\": " << g_afc.tally[w] << ",\n";
@@ -437,7 +471,6 @@ static void saveMacroToJson(GJGameLevel* level) {
     out << "    \"" << (MAX_BUCKET + 1) << "+F\": " << g_afc.tally[MAX_BUCKET + 1] << "\n";
     out << "  },\n";
 
-    // Ghi danh sách các Action (Phân loại rõ Type 1: Press và Type 2: Release)
     out << "  \"actions\": [\n";
     for (size_t i = 0; i < g_afc.actions.size(); i++) {
         const auto& a = g_afc.actions[i];
@@ -461,7 +494,6 @@ static void saveMacroToJson(GJGameLevel* level) {
     out << "}\n";
 }
 
-// Hàm đọc giá trị số/boolean từ một dòng hoặc khối JSON
 static std::string extractJsonToken(const std::string& block, const std::string& key) {
     std::string pattern = "\"" + key + "\"";
     size_t pos = block.find(pattern);
@@ -535,7 +567,6 @@ static bool loadMacroFromJson(GJGameLevel* level) {
     return !g_afc.actions.empty();
 }
 
-// ===== Đồng bộ cài đặt từ Geode Settings =====
 static void syncSettingsFromMod() {
     g_afc.enabled        = Mod::get()->getSettingValue<bool>("enable-mod");
     g_afc.showWhiteTrail = Mod::get()->getSettingValue<bool>("show-white-trail");
@@ -737,7 +768,6 @@ static void refreshHudText() {
     if (g_afc.worldDrawer) g_afc.worldDrawer->setVisible(g_afc.enabled);
     if (!g_afc.enabled) return;
 
-    // 1. Bảng thống kê 1F..10F+ bên trái (Không có chữ NanCounter)
     if (g_afc.tallyLabel) {
         std::string s;
         for (int w = 1; w <= MAX_BUCKET; w++) {
@@ -748,7 +778,6 @@ static void refreshHudText() {
         g_afc.tallyLabel->setString(s.c_str());
     }
 
-    // 2. Dòng trạng thái phía dưới
     if (g_afc.statusLabel) {
         std::string modeStr;
         if (g_afc.stage == BotStage::Record) {
@@ -778,7 +807,6 @@ static void refreshHudText() {
         g_afc.statusLabel->setString(modeStr.c_str());
     }
 
-    // 3. Hiển thị thông tin chi tiết Frame Window của cú Press / Release vừa chạy qua
     if (g_afc.popupLabel) {
         if (g_afc.popupTimer > 0 && !g_afc.lastPopupText.empty()) {
             g_afc.popupLabel->setString(g_afc.lastPopupText.c_str());
@@ -794,7 +822,6 @@ static void renderWorldTrajectories(PlayLayer* pl) {
     g_afc.worldDrawer->clear();
     if (!g_afc.enabled) return;
 
-    // 1. Vẽ White Trajectory Arc đi theo nhân vật
     if (g_afc.showWhiteTrail && g_afc.whiteTrail.size() >= 2) {
         ccColor4F whiteCol = {1.0f, 1.0f, 1.0f, 0.85f};
         for (size_t i = 0; i + 1 < g_afc.whiteTrail.size(); i++) {
@@ -802,7 +829,6 @@ static void renderWorldTrajectories(PlayLayer* pl) {
         }
     }
 
-    // 2. Vẽ các nhánh Trajectory Backward/Forward khi đang Rolling Scan
     for (const auto& branch : g_afc.activeBranches) {
         if (branch.points.size() < 2) continue;
         ccColor4F col;
@@ -822,7 +848,6 @@ static void renderWorldTrajectories(PlayLayer* pl) {
         g_afc.worldDrawer->drawDot(branch.points.back(), branch.survived ? 2.4f : 3.2f, col);
     }
 
-    // 3. Vẽ Ahead Trajectory Preview phía trước nhân vật
     if (g_afc.showAheadTraj && !pl->m_player1->m_isDead) {
         float dt = 1.0f / static_cast<float>(g_afc.targetFps);
         for (int branchType = 0; branchType < 2; branchType++) {
@@ -856,7 +881,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
 
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
-        // Tự động kiểm tra file JSON khi mở màn chơi
         bool hasJsonMacro = loadMacroFromJson(level);
         std::string modeSetting = Mod::get()->getSettingValue<std::string>("work-mode");
 
@@ -865,9 +889,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         } else if (modeSetting == "Replay Saved Data Only") {
             g_afc.stage = BotStage::Replay;
         } else {
-            // Auto: Nếu đã có file JSON đã quét xong -> chạy Replay ngay lập tức!
-            // Nếu có Macro trong JSON nhưng chưa quét xong -> chạy Quét cuốn chiếu (Rolling Scan)
-            // Nếu chưa có file JSON -> vào chế độ Record
             if (hasJsonMacro && g_afc.analysisCompleted) {
                 g_afc.stage = BotStage::Replay;
             } else if (hasJsonMacro && !g_afc.analysisCompleted) {
@@ -976,7 +997,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         refreshHudText();
     }
 
-    // Khởi tạo Quét cuốn chiếu (Rolling Scan) từ đầu level
     void startRollingScan() {
         g_afc.stage = BotStage::RollingScan;
         g_afc.rollingScanInitialized = false;
@@ -989,7 +1009,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         refreshHudText();
     }
 
-    // Khi tạo Checkpoint trong Practice Mode lúc Record, lưu Deep Snapshot để tránh desync Orb/Portal
     CheckpointObject* createCheckpoint() {
         auto ckpt = PlayLayer::createCheckpoint();
         if (ckpt && g_afc.enabled && !g_afc.isSimulating && g_afc.stage == BotStage::Record) {
@@ -1036,7 +1055,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
                     if (g_afc.actions.size() > snap.macroInputCount) {
                         g_afc.actions.resize(snap.macroInputCount);
                     }
-                    // Khôi phục toàn bộ trạng thái Orb, Portal, Trigger & Player tại Checkpoint
                     for (const auto& objEntry : snap.objectsSnap) {
                         objEntry.restore();
                     }
@@ -1068,7 +1086,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         PlayLayer::levelComplete();
         if (!g_afc.enabled || g_afc.isSimulating) return;
 
-        // Hoàn thành 100% trong chế độ Record -> Lưu file JSON thô rồi tự động chạy Rolling Scan
         if (g_afc.stage == BotStage::Record && !g_afc.actions.empty()) {
             g_afc.analysisCompleted = false;
             saveMacroToJson(m_level);
@@ -1088,11 +1105,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         }
     }
 
-    // ========================================================================
-    // CƠ CHẾ QUÉT CUỐN CHIẾU (ROLLING SCAN) VỚI SAVE / LOAD STATE TẠI CHỖ
-    // ========================================================================
-
-    // Chạy thử 1 nhánh độ lệch `delta` bắt đầu trực tiếp từ `rollingMainSnapshot` (không cần chạy lại từ 0%)
     TrajectoryBranch testLocalBranchFromSnapshot(size_t actionIdx, int delta) {
         TrajectoryBranch branch;
         branch.delta = delta;
@@ -1102,7 +1114,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         int origFrame = targetAct.frame;
         int shiftedFrame = origFrame + delta;
 
-        // Kiểm tra ràng buộc thứ tự nhân quả giữa Type 1 (Press) và Type 2 (Release)
         if (shiftedFrame < g_afc.rollingMainSnapshot.frame) {
             return branch;
         }
@@ -1115,8 +1126,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             }
         }
 
-        // Nếu thao tác là Type 1: Press và bị dịch tiến chạm vào Type 2: Release kế tiếp của nó,
-        // dịch lùi nhẹ Release kế tiếp để bảo toàn thời lượng giữ phím tối thiểu
         int nextReleaseShiftedFrame = -1;
         if (targetAct.type == ActionType::Press && actionIdx + 1 < g_afc.actions.size() &&
             g_afc.actions[actionIdx + 1].type == ActionType::Release) {
@@ -1134,7 +1143,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             }
         }
 
-        // Khôi phục chính xác trạng thái gốc trước thao tác (Orb, Portal, Trigger, Vị trí, Vận tốc)
         g_afc.rollingMainSnapshot.restore(this);
 
         int simFrame = g_afc.rollingMainSnapshot.frame;
@@ -1149,7 +1157,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         branch.survived = true;
 
         while (simFrame <= targetEndFrame) {
-            // Thực thi các thao tác Macro trong phạm vi nhánh thử nghiệm
             while (mIdx < g_afc.actions.size()) {
                 int effectiveFrame = g_afc.actions[mIdx].frame;
                 if (mIdx == actionIdx) {
@@ -1187,7 +1194,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         return branch;
     }
 
-    // Bước quét cuốn chiếu cho Action thứ `actionIdx`
     void stepRollingScanForAction(size_t actionIdx) {
         if (actionIdx >= g_afc.actions.size()) return;
 
@@ -1197,7 +1203,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
 
         float dt = 1.0f / static_cast<float>(g_afc.targetFps);
 
-        // Khởi tạo Main Timeline ở frame 0 nếu mới bắt đầu quét cuốn chiếu
         if (!g_afc.rollingScanInitialized) {
             this->resetLevel();
             g_afc.rollingMainFrame = 0;
@@ -1206,7 +1211,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             g_afc.holdingP2 = false;
             g_afc.rollingScanInitialized = true;
         } else {
-            // Khôi phục lại Main Timeline từ Snapshot trước đó để cuốn chiếu tiếp
             g_afc.rollingMainSnapshot.restore(this);
             g_afc.rollingMainFrame = g_afc.rollingMainSnapshot.frame;
             g_afc.rollingMainMacroIdx = g_afc.rollingMainSnapshot.macroInputCount;
@@ -1214,7 +1218,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             g_afc.holdingP2 = g_afc.rollingMainSnapshot.holdingP2;
         }
 
-        // Xác định mốc frame đóng băng trạng thái ngay trước phạm vi quét Backward của Action hiện tại
         int actionFrame = g_afc.actions[actionIdx].frame;
         int desiredSnapshotFrame = std::max(0, actionFrame - MAX_BACKWARD_FRAMES - 2);
         if (actionIdx > 0) {
@@ -1222,7 +1225,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         }
         desiredSnapshotFrame = std::min(desiredSnapshotFrame, actionFrame);
 
-        // 1. Cuốn chiếu Main Timeline tiến tới `desiredSnapshotFrame` (tối đa tới ngay trước `actionIdx`)
         while (g_afc.rollingMainFrame < desiredSnapshotFrame) {
             while (g_afc.rollingMainMacroIdx < actionIdx &&
                    g_afc.actions[g_afc.rollingMainMacroIdx].frame == g_afc.rollingMainFrame) {
@@ -1238,7 +1240,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             g_afc.rollingMainFrame++;
         }
 
-        // Đảm bảo mọi thao tác trước `actionIdx` có cùng frame đã được thực thi trên Main Timeline
         while (g_afc.rollingMainMacroIdx < actionIdx &&
                g_afc.actions[g_afc.rollingMainMacroIdx].frame <= g_afc.rollingMainFrame) {
             const auto& mAct = g_afc.actions[g_afc.rollingMainMacroIdx];
@@ -1249,7 +1250,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             g_afc.rollingMainMacroIdx++;
         }
 
-        // 2. SAVE STATE: Đóng băng toàn bộ PlayLayer (Player, Velocity, Orb, Portal, Trigger) tại `rollingMainFrame`
         g_afc.rollingMainSnapshot = PlayLayerStateSnapshot::capture(
             this,
             g_afc.rollingMainFrame,
@@ -1260,10 +1260,8 @@ class $modify(AFCPlayLayer, PlayLayer) {
 
         g_afc.activeBranches.clear();
 
-        // 3. Kiểm tra nhánh gốc (delta = 0)
         g_afc.activeBranches.push_back(testLocalBranchFromSnapshot(actionIdx, 0));
 
-        // 4. Quét lùi (Backward Frame Check: delta = -1, -2, ..., -MAX_BACKWARD_FRAMES)
         int backwardValid = 0;
         for (int b = 1; b <= MAX_BACKWARD_FRAMES; b++) {
             auto br = testLocalBranchFromSnapshot(actionIdx, -b);
@@ -1276,7 +1274,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
             }
         }
 
-        // 5. Quét tiến (Forward Frame Check: delta = +1, +2, ..., +MAX_FORWARD_FRAMES)
         int forwardValid = 0;
         for (int f = 1; f <= MAX_FORWARD_FRAMES; f++) {
             auto br = testLocalBranchFromSnapshot(actionIdx, +f);
@@ -1289,10 +1286,8 @@ class $modify(AFCPlayLayer, PlayLayer) {
             }
         }
 
-        // 6. LOAD STATE: Khôi phục lại Main Timeline về đúng trạng thái đóng băng để chuẩn bị cho Action kế tiếp
         g_afc.rollingMainSnapshot.restore(this);
 
-        // Công thức tính Frame Window: 1 (frame gốc) + số frame khả thi trước + số frame khả thi sau
         int totalWindow = 1 + backwardValid + forwardValid;
         auto& act = g_afc.actions[actionIdx];
         act.index          = static_cast<int>(actionIdx);
@@ -1393,7 +1388,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
         pollCustomShortcutKeys();
         if (!g_afc.enabled) return;
 
-        // Thực thi Quét cuốn chiếu (Rolling Scan) theo lô mỗi frame để vừa cực nhanh vừa hiển thị mượt
         if (g_afc.stage == BotStage::RollingScan) {
             if (g_afc.rollingActionIdx < g_afc.actions.size()) {
                 for (int step = 0; step < ACTIONS_PER_UI_TICK && g_afc.rollingActionIdx < g_afc.actions.size(); step++) {
@@ -1403,7 +1397,6 @@ class $modify(AFCPlayLayer, PlayLayer) {
                 renderWorldTrajectories(this);
                 refreshHudText();
 
-                // Ngay khi quét xong toàn bộ level -> Xuất ra file JSON và chuyển sang Replay
                 if (g_afc.rollingActionIdx >= g_afc.actions.size()) {
                     g_afc.analysisCompleted = true;
                     g_afc.rollingMainSnapshot = PlayLayerStateSnapshot{};
@@ -1435,7 +1428,6 @@ class $modify(AFCGameLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
         auto pl = PlayLayer::get();
         if (pl && g_afc.enabled && !g_afc.isSimulating && g_afc.stage == BotStage::Record) {
-            // Chống ghi trùng trạng thái nếu phím đang được giữ sẵn
             bool alreadyHolding = isPlayer1 ? g_afc.holdingP1 : g_afc.holdingP2;
             if (down != alreadyHolding) {
                 if (isPlayer1) g_afc.holdingP1 = down;
@@ -1445,7 +1437,7 @@ class $modify(AFCGameLayer, GJBaseGameLayer) {
                 MacroAction act;
                 act.index          = static_cast<int>(g_afc.actions.size());
                 act.frame          = g_afc.currentFrame;
-                act.type           = down ? ActionType::Press : ActionType::Release; // Type 1 vs Type 2
+                act.type           = down ? ActionType::Press : ActionType::Release;
                 act.button         = button;
                 act.player1        = isPlayer1;
                 act.x              = pos.x;
@@ -1464,7 +1456,6 @@ class $modify(AFCGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = static_cast<AFCPlayLayer*>(PlayLayer::get());
         if (pl && g_afc.enabled && !g_afc.isSimulating && g_afc.stage != BotStage::RollingScan) {
-            // Phát lại dữ liệu từ file JSON trong chế độ Replay
             if (g_afc.stage == BotStage::Replay) {
                 while (g_afc.playbackIndex < g_afc.actions.size() &&
                        g_afc.actions[g_afc.playbackIndex].frame == g_afc.currentFrame) {
