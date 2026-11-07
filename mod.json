@@ -6,9 +6,9 @@
         "mac": "2.2081",
         "ios": "2.2081"
     },
-    "id": "roper.frame-window-counter",
-    "name": "Frame Window Counter",
-    "version": "v1.0.0",
+    "id": "afc",
+    "name": "Auto Frame Counter",
+    "version": "v1.0.0-alpha.1",
     "developer": "Roper",
-    "description": "Tự động đo cửa sổ frame của một cú nhảy trong Practice Mode"
+    "description": "This mod auto counter frame window by your record run."
 }
