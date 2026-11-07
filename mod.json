@@ -10,7 +10,7 @@
     "name": "Auto Frame Counter",
     "version": "v1.0.0-alpha.1",
     "developer": "Roper",
-    "description": "Auto counter frame window with NanGD style visual & sound effects.",
+    "description": "Auto counter frame window with NanGD style visual and sound effects.",
     "settings": {
         "enable-mod": {
             "name": "Enable Mod",
@@ -34,7 +34,7 @@
         },
         "target-fps": {
             "name": "Reference FPS",
-            "description": "Moc FPS dung de tinh do hep cua Frame Window (VD: 60, 120, 240).",
+            "description": "Moc FPS dung de tinh do hep cua Frame Window.",
             "type": "int",
             "default": 240,
             "min": 60,
@@ -49,10 +49,24 @@
             "max": 15
         },
         "show-world-text": {
-            "name": "O",
+            "name": "NanGD In-Level Popup",
             "description": "Hien chu so Frame co mau ngay tai vi tri nhan vat nhay tren man choi.",
             "type": "bool",
             "default": true
         },
         "enable-sound": {
-            "name": "NanGD Hit
+            "name": "NanGD Hit Sound",
+            "description": "Phat am thanh khi qua mot Frame Window.",
+            "type": "bool",
+            "default": true
+        },
+        "sound-volume": {
+            "name": "Sound Volume",
+            "description": "Am luong hieu ung am thanh.",
+            "type": "float",
+            "default": 0.7,
+            "min": 0.0,
+            "max": 1.0
+        }
+    }
+}
