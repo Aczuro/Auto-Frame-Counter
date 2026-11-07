@@ -8,29 +8,30 @@
     },
     "id": "roper.afc",
     "name": "Auto Frame Counter",
-    "version": "v1.0.0-alpha.3",
+    "version": "v1.0.0-alpha.4",
     "developer": "Roper",
-    "description": "NanGD Frame Counter with Trajectory Analyzer & Macro Replay data.",
+    "description": "Frame Counter with Exact Physics Trajectory Analyzer & Practice Macro Bot.",
     "settings": {
         "enable-mod": {
             "name": "Enable Mod",
-            "description": "Bat hoac tat toan bo hien thi cua mod.",
+            "description": "Bat hoac tat toan bo hien thi va hoat dong cua mod.",
             "type": "bool",
             "default": true
         },
         "work-mode": {
             "name": "Macro Mode",
-            "description": "Auto: Vua quet Trajectory khi chay macro vua luu lai. Replay Only: Chi phat lai du lieu frame da luu.",
+            "description": "Record: Ghi macro trong Practice. Auto: Chay bot Analyze bang Trajectory roi luu Replay. Replay Only: Phat lai macro va du lieu Frame Window da luu.",
             "type": "string",
             "default": "Auto (Analyze + Replay)",
             "one-of": [
+                "Record Macro (Practice)",
                 "Auto (Analyze + Replay)",
                 "Replay Saved Data Only"
             ]
         },
         "show-white-trail": {
             "name": "Show White Trajectory Arc",
-            "description": "Ve duong quy dao mau trang di theo nhan vat nhu trong video NanGD.",
+            "description": "Ve duong quy dao mau trang di theo nhan vat.",
             "type": "bool",
             "default": true
         },
@@ -50,19 +51,25 @@
         },
         "toggle-key": {
             "name": "Custom Toggle Mod Key",
-            "description": "Tu nhap phim bat/tat mod (VD: A-Z, 0-9, F1-F12, Tab, Shift, Ctrl, Alt, Space...).",
+            "description": "Phim bat/tat mod (VD: A-Z, 0-9, F1-F12, Tab, Shift, Ctrl, Alt, Space...).",
             "type": "string",
             "default": "C"
         },
+        "mode-key": {
+            "name": "Custom Switch Mode Key",
+            "description": "Phim chuyen nhanh che do: Record -> Analyze -> Replay (Mac dinh: M).",
+            "type": "string",
+            "default": "M"
+        },
         "trajectory-key": {
             "name": "Custom Trajectory Preview Key",
-            "description": "Tu nhap phim bat/tat duong du doan quy dao (VD: T, G, F2, Shift...).",
+            "description": "Phim bat/tat duong du doan quy dao (VD: T, G, F2, Shift...).",
             "type": "string",
             "default": "T"
         },
         "reset-key": {
             "name": "Custom Clear Level Data Key",
-            "description": "Tu nhap phim xoa du lieu Frame da luu cua level hien tai (VD: R, P, F4, Backspace...).",
+            "description": "Phim xoa du lieu Macro & Frame da luu cua level hien tai (VD: R, P, F4, Backspace...).",
             "type": "string",
             "default": "R"
         },
