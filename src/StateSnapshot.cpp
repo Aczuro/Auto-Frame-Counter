@@ -28,21 +28,13 @@ ObjectStateSnapshot ObjectStateSnapshot::capture(GameObject* o) {
     s.isDisabled2 = o->m_isDisabled2;
 
     if (auto enh = typeinfo_cast<EnhancedGameObject*>(o)) {
-        s.isEnhanced = true;
-        readEnhancedActivation(enh, s.activatedP1, s.activatedP2);
+        readEnhancedActivation(enh, s.hasBeenActivated, s.hasBeenActivatedP2);
     }
     return s;
 }
 
 void ObjectStateSnapshot::restore() const {
     if (!obj) return;
-
-    // Nếu Orb/Pad/Portal chưa được kích hoạt tại frame gốc nhưng bị kích hoạt ở nhánh thử nghiệm,
-    // gọi resetObject() để trả lại trạng thái nguyên vẹn (nhân vật bay tới Orb vẫn nhảy bình thường)
-    if (!activatedP1 && !activatedP2) {
-        obj->resetObject();
-    }
-
     obj->setPosition(pos);
     obj->m_startPosition = startPos;
     obj->setRotationX(rotX);
@@ -54,201 +46,284 @@ void ObjectStateSnapshot::restore() const {
     obj->m_isDisabled  = isDisabled;
     obj->m_isDisabled2 = isDisabled2;
 
-    if (isEnhanced) {
-        if (auto enh = typeinfo_cast<EnhancedGameObject*>(obj)) {
-            writeEnhancedActivation(enh, activatedP1, activatedP2);
-        }
+    if (auto enh = typeinfo_cast<EnhancedGameObject*>(obj)) {
+        writeEnhancedActivation(enh, hasBeenActivated, hasBeenActivatedP2);
     }
 }
 
-template <typename P>
-static void captureExtraPlayerFields(P* p, SilicatePlayerState& s) {
-    if constexpr (requires { p->m_lastPosition; })        s.lastPos         = p->m_lastPosition;
-    if constexpr (requires { p->m_lastGroundedPos; })     s.lastGroundedPos = p->m_lastGroundedPos;
-    if constexpr (requires { p->m_rotationSpeed; })       s.rotationSpeed   = p->m_rotationSpeed;
-    if constexpr (requires { p->m_fallSpeed; })           s.fallSpeed       = p->m_fallSpeed;
-    if constexpr (requires { p->m_isOnGround2; })         s.onGround2       = p->m_isOnGround2;
-    if constexpr (requires { p->m_isOnGround3; })         s.onGround3       = p->m_isOnGround3;
-    if constexpr (requires { p->m_isOnGround4; })         s.onGround4       = p->m_isOnGround4;
-    if constexpr (requires { p->m_isOnSlope; })           s.isOnSlope       = p->m_isOnSlope;
-    if constexpr (requires { p->m_wasOnSlope; })          s.wasOnSlope      = p->m_wasOnSlope;
-    if constexpr (requires { p->m_slopeAngle; })          s.slopeAngle      = p->m_slopeAngle;
-    if constexpr (requires { p->m_dashX; })               s.dashX           = p->m_dashX;
-    if constexpr (requires { p->m_dashY; })               s.dashY           = p->m_dashY;
-    if constexpr (requires { p->m_dashAngle; })           s.dashAngle       = p->m_dashAngle;
-    if constexpr (requires { p->m_dashStartTime; })       s.dashStartTime   = p->m_dashStartTime;
-    if constexpr (requires { p->m_ringJumpRelated; })     s.ringJumpRelated = p->m_ringJumpRelated;
-    if constexpr (requires { p->m_stateRingJump; })       s.stateRingJump   = p->m_stateRingJump;
-    if constexpr (requires { p->m_jumpBuffered; })        s.jumpBuffered    = p->m_jumpBuffered;
-    if constexpr (requires { p->m_wasRobotJump; })        s.wasRobotJump    = p->m_wasRobotJump;
-    if constexpr (requires { p->m_holdingButtons[1]; }) {
-        auto it = p->m_holdingButtons.find(1);
-        if (it != p->m_holdingButtons.end()) s.holdingBtn1 = it->second;
-    }
-}
-
-template <typename P>
-static void restoreExtraPlayerFields(P* p, const SilicatePlayerState& s) {
-    if constexpr (requires { p->m_lastPosition; })        p->m_lastPosition    = s.lastPos;
-    if constexpr (requires { p->m_lastGroundedPos; })     p->m_lastGroundedPos = s.lastGroundedPos;
-    if constexpr (requires { p->m_rotationSpeed; })       p->m_rotationSpeed   = s.rotationSpeed;
-    if constexpr (requires { p->m_fallSpeed; })           p->m_fallSpeed       = s.fallSpeed;
-    if constexpr (requires { p->m_isOnGround2; })         p->m_isOnGround2     = s.onGround2;
-    if constexpr (requires { p->m_isOnGround3; })         p->m_isOnGround3     = s.onGround3;
-    if constexpr (requires { p->m_isOnGround4; })         p->m_isOnGround4     = s.onGround4;
-    if constexpr (requires { p->m_isOnSlope; })           p->m_isOnSlope       = s.isOnSlope;
-    if constexpr (requires { p->m_wasOnSlope; })          p->m_wasOnSlope      = s.wasOnSlope;
-    if constexpr (requires { p->m_slopeAngle; })          p->m_slopeAngle      = s.slopeAngle;
-    if constexpr (requires { p->m_dashX; })               p->m_dashX           = s.dashX;
-    if constexpr (requires { p->m_dashY; })               p->m_dashY           = s.dashY;
-    if constexpr (requires { p->m_dashAngle; })           p->m_dashAngle       = s.dashAngle;
-    if constexpr (requires { p->m_dashStartTime; })       p->m_dashStartTime   = s.dashStartTime;
-    if constexpr (requires { p->m_ringJumpRelated; })     p->m_ringJumpRelated = s.ringJumpRelated;
-    if constexpr (requires { p->m_stateRingJump; })       p->m_stateRingJump   = s.stateRingJump;
-    if constexpr (requires { p->m_jumpBuffered; })        p->m_jumpBuffered    = s.jumpBuffered;
-    if constexpr (requires { p->m_wasRobotJump; })        p->m_wasRobotJump    = s.wasRobotJump;
-    if constexpr (requires { p->m_holdingButtons[1]; })   p->m_holdingButtons[1] = s.holdingBtn1;
-
-    if (!s.holdingBtn1) {
-        if constexpr (requires { p->m_touchedRings.clear(); }) {
-            p->m_touchedRings.clear();
-        } else if constexpr (requires { p->m_touchedRings->removeAllObjects(); }) {
-            if (p->m_touchedRings) p->m_touchedRings->removeAllObjects();
-        }
-    }
-}
-
-void SilicatePlayerState::captureFrom(PlayerObject* p) {
+void GameStateSnapshot::captureFrom(PlayerObject* p) {
     if (!p) return;
-    valid       = true;
-    pos         = p->getPosition();
-    rotation    = p->getRotation();
-    yVel        = p->m_yVelocity;
-    platXVel    = p->m_platformerXVelocity;
-    gravity     = p->m_gravity;
-    gravityMod  = p->m_gravityMod;
-    speed       = p->m_playerSpeed;
-    vehicleSize = p->m_vehicleSize;
 
-    onGround    = p->m_isOnGround;
-    upsideDown  = p->m_isUpsideDown;
-    goingLeft   = p->m_isGoingLeft;
-    sideways    = p->m_isSideways;
-    dashing     = p->m_isDashing;
+    // 1. Vị trí X/Y & lịch sử vị trí khung hình trước
+    pos             = p->m_position;
+    prevPos         = p->m_previousPosition;
+    realPos         = p->getPosition();
+    lastPos         = p->m_lastPosition;
 
-    isShip      = p->m_isShip;
-    isUfo       = p->m_isBird;
-    isBall      = p->m_isBall;
-    isWave      = p->m_isDart;
-    isRobot     = p->m_isRobot;
-    isSpider    = p->m_isSpider;
-    isSwing     = p->m_isSwing;
+    // 2. Vận tốc m_yVelocity, m_xVelocity & tốc độ di chuyển ngang
+    m_yVelocity     = afc::detail::getPlayerYVelocity(p);
+    m_xVelocity     = afc::detail::getPlayerXVelocity(p);
+    if constexpr (requires { p->m_playerSpeed; }) {
+        playerSpeed = p->m_playerSpeed;
+    }
+    rotation        = p->getRotation();
+    if constexpr (requires { p->m_rotationSpeed; }) {
+        rotationSpeed = p->m_rotationSpeed;
+    }
 
-    captureExtraPlayerFields(p, *this);
+    // 3. Trọng lực, kích thước (Mini/Big) & trạng thái Ngửa/Sấp (m_isUpsideDown)
+    if constexpr (requires { p->m_gravity; }) {
+        gravity = p->m_gravity;
+    }
+    if constexpr (requires { p->m_gravityMod; }) {
+        gravityMod = p->m_gravityMod;
+    }
+    if constexpr (requires { p->m_vehicleSize; }) {
+        vehicleSize = p->m_vehicleSize;
+    }
+    spriteScaleX    = p->getScaleX();
+    spriteScaleY    = p->getScaleY();
+    m_isUpsideDown  = p->m_isUpsideDown;
+
+    // 4. Trạng thái sống/chết & tiếp đất
+    m_isDead        = p->m_isDead;
+    isGrounded      = p->m_isGrounded;
+    isJumping       = p->m_isJumping;
+    if constexpr (requires { p->m_isHolding; }) {
+        isHolding   = p->m_isHolding;
+    }
+    isSliding       = p->m_isSliding;
+    isDashing       = p->m_isDashing;
+    if constexpr (requires { p->m_fallSpeed; }) {
+        fallSpeed   = p->m_fallSpeed;
+    }
+
+    // 5. Trạng thái Slope
+    isOnSlope       = p->m_isOnSlope;
+    if constexpr (requires { p->m_wasOnSlope; }) {
+        wasOnSlope  = p->m_wasOnSlope;
+    }
+    slopeAngle      = p->m_slopeAngle;
+    if constexpr (requires { p->m_slopeStartTime; }) {
+        slopeStartTime = p->m_slopeStartTime;
+    }
+
+    // 6. Trạng thái Dash Orb & Ring Jump
+    dashing         = p->m_dashing;
+    dashX           = p->m_dashX;
+    dashY           = p->m_dashY;
+    dashAngle       = p->m_dashAngle;
+    dashStartTime   = p->m_dashStartTime;
+    if constexpr (requires { p->m_ringJumpRelated; }) {
+        ringJumpRelated = p->m_ringJumpRelated;
+    }
+    if constexpr (requires { p->m_stateRingJump; }) {
+        stateRingJump = p->m_stateRingJump;
+    }
+
+    // 7. Trạng thái Input Buffer & Robot Jump
+    jumpBuffered    = p->m_jumpBuffered;
+    wasRobotJump    = p->m_wasRobotJump;
+    if constexpr (requires { p->m_robotJumpTime; }) {
+        robotJumpTime = p->m_robotJumpTime;
+    }
+    if constexpr (requires { p->m_holdingRight; }) {
+        holdingRight = p->m_holdingRight;
+    }
+    if constexpr (requires { p->m_holdingLeft; }) {
+        holdingLeft  = p->m_holdingLeft;
+    }
+
+    // 8. Hướng di chuyển & Gamemode
+    goingLeft       = p->m_isGoingLeft;
+    sideways        = p->m_isSideways;
+    isShip          = p->m_isShip;
+    isUfo           = p->m_isBird;
+    isBall          = p->m_isBall;
+    isWave          = p->m_isDart;
+    isRobot         = p->m_isRobot;
+    isSpider        = p->m_isSpider;
+    isSwing         = p->m_isSwing;
 }
 
-void SilicatePlayerState::restoreTo(PlayerObject* p) const {
-    if (!valid || !p) return;
-    p->m_isDead              = false;
-    p->setPosition(pos);
-    p->m_position            = pos;
+void GameStateSnapshot::restoreTo(PlayerObject* p) const {
+    if (!p) return;
+
+    // 1. Khôi phục vị trí X/Y
+    p->m_position         = pos;
+    p->m_previousPosition = prevPos;
+    p->setPosition(realPos);
+    p->m_lastPosition     = lastPos;
+
+    // 2. Khôi phục vận tốc m_yVelocity, m_xVelocity & tốc độ
+    afc::detail::setPlayerYVelocity(p, m_yVelocity);
+    afc::detail::setPlayerXVelocity(p, m_xVelocity);
+    if constexpr (requires { p->m_playerSpeed; }) {
+        p->m_playerSpeed = playerSpeed;
+    }
     p->setRotation(rotation);
-    p->m_yVelocity           = yVel;
-    p->m_platformerXVelocity = platXVel;
-    p->m_gravity             = gravity;
-    p->m_gravityMod          = gravityMod;
-    p->m_playerSpeed         = speed;
-    p->m_vehicleSize         = vehicleSize;
-
-    p->m_isOnGround          = onGround;
-    p->m_isUpsideDown        = upsideDown;
-    p->m_isGoingLeft         = goingLeft;
-    p->m_isSideways          = sideways;
-    p->m_isDashing           = dashing;
-
-    p->m_isShip              = isShip;
-    p->m_isBird              = isUfo;
-    p->m_isBall              = isBall;
-    p->m_isDart              = isWave;
-    p->m_isRobot             = isRobot;
-    p->m_isSpider            = isSpider;
-    p->m_isSwing             = isSwing;
-
-    restoreExtraPlayerFields(p, *this);
-}
-
-template <typename CkptT>
-static void hidePhysicalCheckpointSprite(CkptT* ckpt) {
-    if constexpr (requires { ckpt->m_physicalCheckpointObject; }) {
-        if (ckpt->m_physicalCheckpointObject) {
-            ckpt->m_physicalCheckpointObject->setVisible(false);
-            ckpt->m_physicalCheckpointObject->removeFromParent();
-        }
-    }
-}
-
-FullPlayLayerSnapshot FullPlayLayerSnapshot::capture(
-    PlayLayer* pl,
-    int curFrame,
-    size_t mIdx,
-    bool hold1,
-    bool hold2,
-    bool createNativeCkpt
-) {
-    FullPlayLayerSnapshot s;
-    if (!pl || !pl->m_player1) return s;
-
-    s.valid      = true;
-    s.frame      = curFrame;
-    s.macroIndex = mIdx;
-    s.holdingP1  = hold1;
-    s.holdingP2  = hold2;
-
-    if (createNativeCkpt) {
-        s.engineCkpt = pl->createCheckpoint();
-        if (s.engineCkpt) {
-            hidePhysicalCheckpointSprite(s.engineCkpt.data());
-        }
+    if constexpr (requires { p->m_rotationSpeed; }) {
+        p->m_rotationSpeed = rotationSpeed;
     }
 
-    s.p1State.captureFrom(pl->m_player1);
-    s.p2State.captureFrom(pl->m_player2);
+    // 3. Khôi phục trọng lực, kích thước & trạng thái Ngửa/Sấp (m_isUpsideDown)
+    if constexpr (requires { p->m_gravity; }) {
+        p->m_gravity = gravity;
+    }
+    if constexpr (requires { p->m_gravityMod; }) {
+        p->m_gravityMod = gravityMod;
+    }
+    if constexpr (requires { p->m_vehicleSize; }) {
+        p->m_vehicleSize = vehicleSize;
+    }
+    p->setScaleX(spriteScaleX);
+    p->setScaleY(spriteScaleY);
+    p->m_isUpsideDown     = m_isUpsideDown;
+    p->flipGravity(m_isUpsideDown, true);
+
+    // 4. Khôi phục cờ sống/chết & tiếp đất
+    p->m_isDead           = m_isDead;
+    p->m_isGrounded       = isGrounded;
+    p->m_isJumping        = isJumping;
+    if constexpr (requires { p->m_isHolding; }) {
+        p->m_isHolding    = isHolding;
+    }
+    p->m_isSliding        = isSliding;
+    p->m_isDashing        = isDashing;
+    if constexpr (requires { p->m_fallSpeed; }) {
+        p->m_fallSpeed    = fallSpeed;
+    }
+
+    // 5. Khôi phục trạng thái Slope
+    p->m_isOnSlope        = isOnSlope;
+    if constexpr (requires { p->m_wasOnSlope; }) {
+        p->m_wasOnSlope   = wasOnSlope;
+    }
+    p->m_slopeAngle       = slopeAngle;
+    if constexpr (requires { p->m_slopeStartTime; }) {
+        p->m_slopeStartTime = slopeStartTime;
+    }
+
+    // 6. Khôi phục Dash Orb & Ring Jump
+    p->m_dashing          = dashing;
+    p->m_dashX            = dashX;
+    p->m_dashY            = dashY;
+    p->m_dashAngle        = dashAngle;
+    p->m_dashStartTime    = dashStartTime;
+    if constexpr (requires { p->m_ringJumpRelated; }) {
+        p->m_ringJumpRelated = ringJumpRelated;
+    }
+    if constexpr (requires { p->m_stateRingJump; }) {
+        p->m_stateRingJump = stateRingJump;
+    }
+
+    // 7. Khôi phục Input Buffer & Robot Jump
+    p->m_jumpBuffered     = jumpBuffered;
+    p->m_wasRobotJump     = wasRobotJump;
+    if constexpr (requires { p->m_robotJumpTime; }) {
+        p->m_robotJumpTime = robotJumpTime;
+    }
+    if constexpr (requires { p->m_holdingRight; }) {
+        p->m_holdingRight = holdingRight;
+    }
+    if constexpr (requires { p->m_holdingLeft; }) {
+        p->m_holdingLeft  = holdingLeft;
+    }
+
+    // 8. Khôi phục hướng & Gamemode
+    p->m_isGoingLeft      = goingLeft;
+    p->m_isSideways       = sideways;
+    p->m_isShip           = isShip;
+    p->m_isBird           = isUfo;
+    p->m_isBall           = isBall;
+    p->m_isDart           = isWave;
+    p->m_isRobot          = isRobot;
+    p->m_isSpider         = isSpider;
+    p->m_isSwing          = isSwing;
+}
+
+void FullPlayLayerSnapshot::clear() {
+    valid = false;
+    frame = 0;
+    macroIndex = 0;
+    holdingP1 = false;
+    holdingP2 = false;
+    engineCkpt = nullptr;
+    touchedObjects.clear();
+}
+
+bool FullPlayLayerSnapshot::capture(PlayLayer* pl, int exactPhysicsFrame, size_t mIdx, bool hP1, bool hP2) {
+    if (!pl) return false;
+    clear();
+
+    // Lưu Checkpoint gốc của Engine kèm GJGameState
+    engineCkpt = pl->createCheckpoint();
+    if (!engineCkpt) return false;
+
+    frame          = exactPhysicsFrame;
+    macroIndex     = mIdx;
+    holdingP1      = hP1;
+    holdingP2      = hP2;
+    savedGameState = pl->m_gameState;
+    isDualMode     = pl->m_gameState.m_isDualMode;
+
+    if (pl->m_player1) p1State.captureFrom(pl->m_player1);
+    if (pl->m_player2) p2State.captureFrom(pl->m_player2);
 
     if (pl->m_objects) {
-        float px = pl->m_player1->getPositionX();
-        float minX = px - 900.f;
-        float maxX = px + 3200.f;
-
-        int count = pl->m_objects->count();
-        s.activeObjects.reserve(256);
-        for (int i = 0; i < count; i++) {
-            auto obj = static_cast<GameObject*>(pl->m_objects->objectAtIndex(i));
+        CCARRAY_FOREACH_DATA_TYPE(pl->m_objects, GameObject*, obj) {
             if (!obj) continue;
-            float ox = obj->getPositionX();
-            if (ox >= minX && ox <= maxX) {
-                s.activeObjects.push_back(ObjectStateSnapshot::capture(obj));
+            bool enhAct = false;
+            if (auto enh = typeinfo_cast<EnhancedGameObject*>(obj)) {
+                readEnhancedActivation(enh, enhAct, enhAct);
+                bool a1 = false, a2 = false;
+                readEnhancedActivation(enh, a1, a2);
+                enhAct = a1 || a2;
+            }
+            if (obj->m_isDisabled || obj->m_isDisabled2 || enhAct) {
+                touchedObjects.push_back(ObjectStateSnapshot::capture(obj));
             }
         }
     }
-    return s;
+
+    valid = true;
+    return true;
 }
 
-void FullPlayLayerSnapshot::restore(PlayLayer* pl) const {
-    if (!valid || !pl) return;
+bool FullPlayLayerSnapshot::restore(PlayLayer* pl) const {
+    if (!valid || !pl || !engineCkpt) return false;
 
-    if (engineCkpt) {
-        pl->loadFromCheckpoint(engineCkpt);
+    // 1. Nạp lại Checkpoint gốc của Engine
+    pl->loadFromCheckpoint(engineCkpt);
+
+    // 2. Ghi đè lại toàn bộ trạng thái GJGameState để tránh lệch Camera / Portal / Dual
+    pl->m_gameState = savedGameState;
+
+    // 3. Khôi phục chính xác trạng thái Player 1 & Player 2 từ GameStateSnapshot
+    if (pl->m_player1) {
+        p1State.restoreTo(pl->m_player1);
     }
-
-    for (const auto& entry : activeObjects) {
-        entry.restore();
-    }
-
-    p1State.restoreTo(pl->m_player1);
-    p2State.restoreTo(pl->m_player2);
-
-    pl->handleButton(holdingP1, 1, true);
     if (pl->m_player2) {
-        pl->handleButton(holdingP2, 1, false);
+        p2State.restoreTo(pl->m_player2);
     }
+
+    // 4. Khôi phục các Orbs/Pads/Triggers đã kích hoạt trước thời điểm Snapshot
+    for (const auto& objSnap : touchedObjects) {
+        objSnap.restore();
+    }
+
+    // 5. Đồng bộ hoá trạng thái giữ nút (Hold State) với Snapshot
+    if (pl->m_player1) {
+        if (holdingP1) pl->pushButton(1, true);
+        else           pl->releaseButton(1, true);
+        // Ghi đè lại lần nữa để pushButton/releaseButton không làm phát sinh vận tốc nhảy giả
+        p1State.restoreTo(pl->m_player1);
+    }
+    if (pl->m_player2 && isDualMode) {
+        if (holdingP2) pl->pushButton(1, false);
+        else           pl->releaseButton(1, false);
+        p2State.restoreTo(pl->m_player2);
+    }
+
+    return true;
 }
