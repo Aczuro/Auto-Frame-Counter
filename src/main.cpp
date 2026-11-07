@@ -2,13 +2,13 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/CheckpointObject.hpp>
-#include <Geode/loader/SettingV3.hpp>
 
 using namespace geode::prelude;
 
-constexpr int MAX_SCAN_DELTA   = 10;
-constexpr int LOOKAHEAD_TICKS  = 90;
-constexpr int MAX_BUCKET       = 10;
+// ===== Cấu hình độ rộng quét Frame & Trajectory =====
+constexpr int MAX_SCAN_DELTA   = 10;   // Quét +-10 frame trước và sau mỗi click/release
+constexpr int LOOKAHEAD_TICKS  = 90;   // Số tick mô phỏng sau thao tác để kiểm tra sống/chết
+constexpr int MAX_BUCKET       = 10;   // Thống kê từ 1f đến 10f (và 11+)
 
 struct MacroAction {
     int tick;
@@ -46,7 +46,6 @@ struct CheckpointState {
 };
 
 struct EngineState {
-    bool modEnabled = true; // Trạng thái Bật/Tắt mod
     ModMode mode = ModMode::Idle;
     bool isSimulating = false;
     bool simDead = false;
@@ -57,21 +56,23 @@ struct EngineState {
     std::vector<MacroAction> actions;
     std::unordered_map<CheckpointObject*, CheckpointState> ckptMap;
 
+    // Dữ liệu quét từng action
     int scanActionIdx = 0;
     int scanDelta = -MAX_SCAN_DELTA;
     ActionAnalysis currentAnalysis;
     std::vector<ActionAnalysis> allAnalyses;
     int tally[MAX_BUCKET + 2] = {};
 
+    // Hiển thị Trajectory & HUD
     bool showTrajectory = true;
     int viewedActionIdx = -1;
     CCDrawNode* trajDrawer = nullptr;
-    CCNode* hudContainer = nullptr; // Chứa toàn bộ HUD để ẩn/hiện khi bật/tắt mod
 
     CCLabelBMFont* bigLabel = nullptr;
     CCLabelBMFont* infoLabel = nullptr;
     CCLabelBMFont* tallyLabel = nullptr;
     CCLabelBMFont* frameLabel = nullptr;
+    CCLabelBMFont* recBtnLabel = nullptr;
 };
 
 inline EngineState g_state;
@@ -89,7 +90,7 @@ static CCLabelBMFont* makeHudLabel(CCNode* parent, float scale, CCPoint anchor, 
 static void drawCurrentTrajectories() {
     if (!g_state.trajDrawer) return;
     g_state.trajDrawer->clear();
-    if (!g_state.modEnabled || !g_state.showTrajectory || g_state.allAnalyses.empty()) return;
+    if (!g_state.showTrajectory || g_state.allAnalyses.empty()) return;
 
     int idx = g_state.viewedActionIdx;
     if (idx < 0 || idx >= static_cast<int>(g_state.allAnalyses.size())) {
@@ -104,33 +105,26 @@ static void drawCurrentTrajectories() {
         ccColor4F col;
         float thickness = 1.2f;
         if (line.delta == 0) {
-            col = {1.0f, 0.9f, 0.1f, 0.95f}; // Vàng: Quỹ đạo gốc
+            col = {1.0f, 0.9f, 0.1f, 0.95f}; // Vàng: quỹ đạo gốc trong bản Record
             thickness = 2.0f;
         } else if (line.passed) {
-            col = {0.15f, 1.0f, 0.25f, 0.65f}; // Xanh lá: Sống
+            col = {0.15f, 1.0f, 0.25f, 0.65f}; // Xanh lá: các frame lân cận qua được
         } else {
-            col = {1.0f, 0.15f, 0.15f, 0.45f}; // Đỏ: Chết
+            col = {1.0f, 0.15f, 0.15f, 0.45f}; // Đỏ: các frame lân cận bị chết
         }
 
         for (size_t i = 0; i + 1 < line.points.size(); i++) {
             g_state.trajDrawer->drawSegment(line.points[i], line.points[i + 1], thickness, col);
         }
+        // Chấm tròn đánh dấu điểm kết thúc hoặc điểm va chạm chết
         g_state.trajDrawer->drawDot(line.points.back(), line.passed ? 2.5f : 3.5f, col);
-    }
-}
-
-static void updateHudVisibility() {
-    if (g_state.hudContainer) {
-        g_state.hudContainer->setVisible(g_state.modEnabled);
-    }
-    if (g_state.trajDrawer) {
-        g_state.trajDrawer->setVisible(g_state.modEnabled);
     }
 }
 
 static void updateHud() {
     if (!g_state.bigLabel || !g_state.infoLabel || !g_state.tallyLabel) return;
 
+    // 1. Bảng thống kê bên trái
     std::string tallyStr = "FRAME WINDOW COUNTER";
     for (int w = 1; w <= MAX_BUCKET; w++) {
         tallyStr += fmt::format("\n{}f: {}", w, g_state.tally[w]);
@@ -138,16 +132,11 @@ static void updateHud() {
     tallyStr += fmt::format("\n{}+: {}", MAX_BUCKET + 1, g_state.tally[MAX_BUCKET + 1]);
     g_state.tallyLabel->setString(tallyStr.c_str());
 
-    if (!g_state.modEnabled) {
-        g_state.bigLabel->setString("OFF");
-        g_state.infoLabel->setString("Mod is OFF (Press F2 to toggle)");
-        return;
-    }
-
+    // 2. Trạng thái theo chế độ
     if (g_state.mode == ModMode::Recording) {
         g_state.bigLabel->setString("REC");
         g_state.infoLabel->setString(fmt::format(
-            "Actions recorded: {}\nPlay 0-100% (F3 to Stop/Start)",
+            "Actions recorded: {}\nPlay 0-100% in Practice Mode",
             g_state.actions.size()
         ).c_str());
         return;
@@ -181,33 +170,40 @@ static void updateHud() {
 
         g_state.infoLabel->setString(fmt::format(
             "Action #{}/{} ({} @ tick {})\nBack: {}f | Front: +{}f (Window: {:+d} to {:+d})\n{}",
-            idx + 1, g_state.allAnalyses.size(),
+            idx + 1,
+            g_state.allAnalyses.size(),
             a.isDown ? "CLICK" : "RELEASE",
             a.originalTick,
-            -a.minDelta, a.maxDelta,
-            a.minDelta, a.maxDelta,
+            -a.minDelta,
+            a.maxDelta,
+            a.minDelta,
+            a.maxDelta,
             mapBar
         ).c_str());
     } else {
         g_state.bigLabel->setString("-");
         g_state.infoLabel->setString(fmt::format(
-            "Macro: {} actions\nF3: REC | F4: SCAN | F2: Toggle",
+            "Macro: {} actions\nPress REC to record, SCAN to test frames",
             g_state.actions.size()
         ).c_str());
     }
 }
 
+// Tạo danh sách input đã dịch chuyển thao tác thứ `targetIdx` đi `delta` frame
 static std::vector<MacroAction> buildPerturbedMacro(int targetIdx, int delta) {
     auto modified = g_state.actions;
     int origTick = modified[targetIdx].tick;
     int newTick = std::max(0, origTick + delta);
 
+    // Không cho phép lùi vượt qua thao tác ngay trước đó
     if (targetIdx > 0 && newTick <= modified[targetIdx - 1].tick) {
         newTick = modified[targetIdx - 1].tick + 1;
     }
     int actualShift = newTick - origTick;
     modified[targetIdx].tick = newTick;
 
+    // Nếu dịch một cú Click (down) chạm vào hoặc vượt qua cú Release (up) của chính nó,
+    // dịch luôn cú Release theo để giữ nguyên thời gian giữ phím (hold)
     if (modified[targetIdx].down && targetIdx + 1 < static_cast<int>(modified.size())) {
         if (!modified[targetIdx + 1].down && modified[targetIdx + 1].tick <= newTick) {
             modified[targetIdx + 1].tick = std::max(newTick + 1, modified[targetIdx + 1].tick + actualShift);
@@ -222,25 +218,20 @@ class $modify(TrajPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
         auto ws = CCDirector::get()->getWinSize();
+        g_state.bigLabel   = makeHudLabel(this, 0.9f,  {0.5f, 1.f}, {ws.width / 2, ws.height - 6.f});
+        g_state.infoLabel  = makeHudLabel(this, 0.28f, {0.5f, 1.f}, {ws.width / 2, ws.height - 48.f});
+        g_state.tallyLabel = makeHudLabel(this, 0.28f, {0.f, 1.f},  {6.f, ws.height - 6.f});
+        g_state.frameLabel = makeHudLabel(this, 0.4f,  {0.5f, 0.f}, {ws.width / 2, 6.f});
 
-        // Tạo node chứa HUD để có thể ẩn/hiện toàn bộ khi tắt mod
-        g_state.hudContainer = CCNode::create();
-        this->addChild(g_state.hudContainer, 1000);
-
-        g_state.bigLabel   = makeHudLabel(g_state.hudContainer, 0.9f,  {0.5f, 1.f}, {ws.width / 2, ws.height - 6.f});
-        g_state.infoLabel  = makeHudLabel(g_state.hudContainer, 0.28f, {0.5f, 1.f}, {ws.width / 2, ws.height - 48.f});
-        g_state.tallyLabel = makeHudLabel(g_state.hudContainer, 0.28f, {0.f, 1.f},  {6.f, ws.height - 6.f});
-        g_state.frameLabel = makeHudLabel(g_state.hudContainer, 0.4f,  {0.5f, 0.f}, {ws.width / 2, 6.f});
-
+        // Khởi tạo lớp vẽ Trajectory gắn trực tiếp vào m_objectLayer của màn chơi
         g_state.trajDrawer = CCDrawNode::create();
         if (m_objectLayer) {
             m_objectLayer->addChild(g_state.trajDrawer, 1500);
         }
 
-        // Menu nút bấm trên màn hình (vẫn giữ để dùng song song trên PC hoặc Mobile)
+        // Menu điều khiển góc dưới bên phải
         auto menu = CCMenu::create();
         menu->setPosition({ws.width - 115.f, 24.f});
-        g_state.hudContainer->addChild(menu, 10);
 
         auto recSpr = ButtonSprite::create("REC", 36, true, "bigFont.fnt", "GJ_button_01.png", 24.f, 0.45f);
         auto btnRec = CCMenuItemSpriteExtra::create(recSpr, this, menu_selector(TrajPlayLayer::onToggleRecord));
@@ -267,14 +258,13 @@ class $modify(TrajPlayLayer, PlayLayer) {
         menu->addChild(btnPrev);
         menu->addChild(btnNext);
         menu->addChild(btnTraj);
+        this->addChild(menu, 1000);
 
-        updateHudVisibility();
         updateHud();
         return true;
     }
 
     void onToggleRecord(CCObject*) {
-        if (!g_state.modEnabled) return;
         if (g_state.mode == ModMode::Recording) {
             g_state.mode = ModMode::Idle;
             updateHud();
@@ -291,7 +281,6 @@ class $modify(TrajPlayLayer, PlayLayer) {
     }
 
     void onStartScan(CCObject*) {
-        if (!g_state.modEnabled) return;
         if (g_state.mode == ModMode::Scanning) {
             g_state.mode = ModMode::Idle;
             this->resetLevel();
@@ -299,73 +288,61 @@ class $modify(TrajPlayLayer, PlayLayer) {
             return;
         }
         if (g_state.actions.empty()) {
-            FLAlertLayer::create("No Record", "Hãy bấm REC và hoàn thành một lượt chạy trong Practice Mode trước!", "OK")->show();
+            FLAlertLayer::create(
+                "No Record Found",
+                "Press <cy>REC</c> and complete a Practice run (or portion of the level) first!",
+                "OK"
+            )->show();
             return;
         }
 
+        // Bắt buộc tắt Practice Mode hoặc xóa checkpoint tạm thời khi mô phỏng từ 0%
+        // để resetLevel() luôn đưa nhân vật về tick 0
         g_state.allAnalyses.clear();
         std::fill(std::begin(g_state.tally), std::end(g_state.tally), 0);
 
         g_state.scanActionIdx = 0;
         g_state.scanDelta = -MAX_SCAN_DELTA;
         g_state.currentAnalysis = ActionAnalysis{
-            0, g_state.actions[0].tick, g_state.actions[0].down, 0, 0, 0, {}
+            0,
+            g_state.actions[0].tick,
+            g_state.actions[0].down,
+            0, 0, 0, {}
         };
         g_state.mode = ModMode::Scanning;
         updateHud();
     }
 
     void onPrevAction(CCObject*) {
-        if (!g_state.modEnabled || g_state.allAnalyses.empty()) return;
-        g_state.viewedActionIdx = (g_state.viewedActionIdx <= 0) ? static_cast<int>(g_state.allAnalyses.size()) - 1 : g_state.viewedActionIdx - 1;
+        if (g_state.allAnalyses.empty()) return;
+        if (g_state.viewedActionIdx <= 0) {
+            g_state.viewedActionIdx = static_cast<int>(g_state.allAnalyses.size()) - 1;
+        } else {
+            g_state.viewedActionIdx--;
+        }
         drawCurrentTrajectories();
         updateHud();
     }
 
     void onNextAction(CCObject*) {
-        if (!g_state.modEnabled || g_state.allAnalyses.empty()) return;
+        if (g_state.allAnalyses.empty()) return;
         g_state.viewedActionIdx = (g_state.viewedActionIdx + 1) % static_cast<int>(g_state.allAnalyses.size());
         drawCurrentTrajectories();
         updateHud();
     }
 
     void onToggleTraj(CCObject*) {
-        if (!g_state.modEnabled) return;
         g_state.showTrajectory = !g_state.showTrajectory;
         drawCurrentTrajectories();
     }
 
-    // Bắt sự kiện phím bàn phím trên PC
-    bool keyDown(enumKeyCodes key) {
-        auto toggleKey = Mod::get()->getSettingValue<geode::Keybind>("toggle-mod-key");
-        auto recKey = Mod::get()->getSettingValue<geode::Keybind>("rec-key");
-        auto scanKey = Mod::get()->getSettingValue<geode::Keybind>("scan-key");
-
-        if (toggleKey.isKeyImmediate(key)) {
-            g_state.modEnabled = !g_state.modEnabled;
-            updateHudVisibility();
-            updateHud();
-            return true;
-        }
-
-        if (g_state.modEnabled) {
-            if (recKey.isKeyImmediate(key)) {
-                this->onToggleRecord(nullptr);
-                return true;
-            }
-            if (scanKey.isKeyImmediate(key)) {
-                this->onStartScan(nullptr);
-                return true;
-            }
-        }
-
-        return PlayLayer::keyDown(key);
-    }
-
     CheckpointObject* createCheckpoint() {
         auto ckpt = PlayLayer::createCheckpoint();
-        if (ckpt && g_state.modEnabled && g_state.mode == ModMode::Recording) {
-            g_state.ckptMap[ckpt] = CheckpointState{ g_state.currentTick, g_state.actions.size() };
+        if (ckpt && g_state.mode == ModMode::Recording) {
+            g_state.ckptMap[ckpt] = CheckpointState{
+                g_state.currentTick,
+                g_state.actions.size()
+            };
         }
         return ckpt;
     }
@@ -374,9 +351,8 @@ class $modify(TrajPlayLayer, PlayLayer) {
         this->handleButton(false, 1, true);
         PlayLayer::resetLevel();
 
-        if (!g_state.modEnabled) return;
-
         if (g_state.mode == ModMode::Recording) {
+            // Nếu đang ở Practice Mode và có checkpoint, khôi phục đúng tick & cắt bỏ thao tác thừa
             if (m_isPracticeMode && m_checkpointArray && m_checkpointArray->count() > 0) {
                 auto lastCkpt = static_cast<CheckpointObject*>(m_checkpointArray->lastObject());
                 auto it = g_state.ckptMap.find(lastCkpt);
@@ -410,15 +386,20 @@ class $modify(TrajPlayLayer, PlayLayer) {
         }
     }
 
+    // Chạy mô phỏng 1 độ lệch (delta) của thao tác `actionIdx` và ghi lại Trajectory
     void runSingleTrajectorySim(int actionIdx, int delta) {
         auto modifiedMacro = buildPerturbedMacro(actionIdx, delta);
         int baseTick = g_state.actions[actionIdx].tick;
+
+        // Xác định tick đích cần sống sót tới: qua thao tác tiếp theo + 30 tick, hoặc tối thiểu LOOKAHEAD_TICKS
         int targetEndTick = baseTick + LOOKAHEAD_TICKS;
         if (actionIdx + 1 < static_cast<int>(g_state.actions.size())) {
             targetEndTick = std::max(targetEndTick, g_state.actions[actionIdx + 1].tick + 30);
         }
+
         int drawStartTick = std::max(0, baseTick - MAX_SCAN_DELTA - 5);
 
+        // Tạm thời bỏ qua checkpoint trong lúc mô phỏng để luôn chạy chuẩn từ đầu
         bool savedPractice = m_isPracticeMode;
         m_isPracticeMode = false;
 
@@ -436,7 +417,11 @@ class $modify(TrajPlayLayer, PlayLayer) {
 
         while (g_state.currentTick <= targetEndTick) {
             while (macroIdx < modifiedMacro.size() && modifiedMacro[macroIdx].tick == g_state.currentTick) {
-                this->handleButton(modifiedMacro[macroIdx].down, modifiedMacro[macroIdx].button, modifiedMacro[macroIdx].player1);
+                this->handleButton(
+                    modifiedMacro[macroIdx].down,
+                    modifiedMacro[macroIdx].button,
+                    modifiedMacro[macroIdx].player1
+                );
                 macroIdx++;
             }
 
@@ -472,31 +457,47 @@ class $modify(TrajPlayLayer, PlayLayer) {
             g_state.frameLabel->setString(fmt::format("Tick: {}", g_state.currentTick).c_str());
         }
 
-        if (g_state.modEnabled && g_state.mode == ModMode::Scanning) {
+        // Xử lý quét từng bước trong postUpdate để game không bị treo và vẽ Trajectory theo thời gian thực
+        if (g_state.mode == ModMode::Scanning) {
             runSingleTrajectorySim(g_state.scanActionIdx, g_state.scanDelta);
 
             g_state.scanDelta++;
             if (g_state.scanDelta > MAX_SCAN_DELTA) {
+                // Tính khoảng frame liền mạch chứa (hoặc gần nhất với) delta = 0
                 int minD = 0, maxD = 0, winLen = 0;
                 for (const auto& t : g_state.currentAnalysis.trajectories) {
                     if (t.passed) winLen++;
                 }
 
+                // Đếm số frame sống được ở phía trước (delta < 0) và phía sau (delta > 0) liên tiếp quanh gốc
                 for (int d = -1; d >= -MAX_SCAN_DELTA; d--) {
-                    auto it = std::find_if(g_state.currentAnalysis.trajectories.begin(), g_state.currentAnalysis.trajectories.end(), [d](const TrajectoryLine& l) { return l.delta == d; });
+                    auto it = std::find_if(
+                        g_state.currentAnalysis.trajectories.begin(),
+                        g_state.currentAnalysis.trajectories.end(),
+                        [d](const TrajectoryLine& l) { return l.delta == d; }
+                    );
                     if (it != g_state.currentAnalysis.trajectories.end() && it->passed) minD = d;
                     else break;
                 }
                 for (int d = 1; d <= MAX_SCAN_DELTA; d++) {
-                    auto it = std::find_if(g_state.currentAnalysis.trajectories.begin(), g_state.currentAnalysis.trajectories.end(), [d](const TrajectoryLine& l) { return l.delta == d; });
+                    auto it = std::find_if(
+                        g_state.currentAnalysis.trajectories.begin(),
+                        g_state.currentAnalysis.trajectories.end(),
+                        [d](const TrajectoryLine& l) { return l.delta == d; }
+                    );
                     if (it != g_state.currentAnalysis.trajectories.end() && it->passed) maxD = d;
                     else break;
                 }
 
+                // Tổng số frame qua được liên tiếp quanh cú click/release gốc
                 int contiguousWindow = (maxD - minD) + 1;
-                auto zeroIt = std::find_if(g_state.currentAnalysis.trajectories.begin(), g_state.currentAnalysis.trajectories.end(), [](const TrajectoryLine& l) { return l.delta == 0; });
+                auto zeroIt = std::find_if(
+                    g_state.currentAnalysis.trajectories.begin(),
+                    g_state.currentAnalysis.trajectories.end(),
+                    [](const TrajectoryLine& l) { return l.delta == 0; }
+                );
                 if (zeroIt != g_state.currentAnalysis.trajectories.end() && !zeroIt->passed) {
-                    contiguousWindow = winLen;
+                    contiguousWindow = winLen; // Dự phòng nếu lệch RNG
                 }
 
                 g_state.currentAnalysis.minDelta = minD;
@@ -512,6 +513,7 @@ class $modify(TrajPlayLayer, PlayLayer) {
                 g_state.viewedActionIdx = static_cast<int>(g_state.allAnalyses.size()) - 1;
                 drawCurrentTrajectories();
 
+                // Chuyển sang Action tiếp theo
                 g_state.scanActionIdx++;
                 if (g_state.scanActionIdx >= static_cast<int>(g_state.actions.size())) {
                     g_state.mode = ModMode::Replaying;
@@ -522,7 +524,10 @@ class $modify(TrajPlayLayer, PlayLayer) {
 
                 g_state.scanDelta = -MAX_SCAN_DELTA;
                 g_state.currentAnalysis = ActionAnalysis{
-                    g_state.scanActionIdx, g_state.actions[g_state.scanActionIdx].tick, g_state.actions[g_state.scanActionIdx].down, 0, 0, 0, {}
+                    g_state.scanActionIdx,
+                    g_state.actions[g_state.scanActionIdx].tick,
+                    g_state.actions[g_state.scanActionIdx].down,
+                    0, 0, 0, {}
                 };
             }
             updateHud();
@@ -532,20 +537,26 @@ class $modify(TrajPlayLayer, PlayLayer) {
 
 class $modify(TrajGameLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
-        if (g_state.modEnabled && PlayLayer::get() && !g_state.isSimulating && g_state.mode == ModMode::Recording) {
-            g_state.actions.push_back(MacroAction{ g_state.currentTick, down, button, isPlayer1 });
+        if (PlayLayer::get() && !g_state.isSimulating && g_state.mode == ModMode::Recording) {
+            g_state.actions.push_back(MacroAction{
+                g_state.currentTick,
+                down,
+                button,
+                isPlayer1
+            });
         }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (g_state.modEnabled && PlayLayer::get() && !g_state.isSimulating) {
+        if (PlayLayer::get() && !g_state.isSimulating) {
             if (g_state.mode == ModMode::Replaying) {
                 while (g_state.playbackIdx < g_state.actions.size() &&
                        g_state.actions[g_state.playbackIdx].tick == g_state.currentTick) {
                     const auto& act = g_state.actions[g_state.playbackIdx];
                     GJBaseGameLayer::handleButton(act.down, act.button, act.player1);
 
+                    // Tự động chuyển Trajectory trên màn hình theo cú click đang phát
                     if (g_state.playbackIdx < g_state.allAnalyses.size()) {
                         g_state.viewedActionIdx = static_cast<int>(g_state.playbackIdx);
                         drawCurrentTrajectories();
@@ -556,6 +567,6 @@ class $modify(TrajGameLayer, GJBaseGameLayer) {
             }
             g_state.currentTick++;
         }
-        GJBaseGameLayer::processCommands(dt, isHalfTech, isLastTick);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 };
