@@ -1,57 +1,30 @@
 #pragma once
 #include <Geode/Geode.hpp>
+#include <Geode/binding/PlayerObject.hpp>
+#include <Geode/binding/PlayLayer.hpp>
+#include <Geode/binding/GameObject.hpp>
 #include <vector>
-#include <type_traits>
 
 using namespace geode::prelude;
 
 namespace afc::detail {
-    // C++20 concept-based SFINAE adapters to remain compatible across Geode bindings
-    // (e.g., m_yVelocity vs m_yAccel, m_xVelocity vs m_xAccel / m_platformerXVelocity)
-    inline double getPlayerYVelocity(PlayerObject* p) {
-        if (!p) return 0.0;
-        if constexpr (requires { p->m_yVelocity; }) {
-            return static_cast<double>(p->m_yVelocity);
-        } else if constexpr (requires { p->m_yAccel; }) {
-            return static_cast<double>(p->m_yAccel);
-        }
-        return 0.0;
-    }
 
-    inline void setPlayerYVelocity(PlayerObject* p, double val) {
-        if (!p) return;
-        if constexpr (requires { p->m_yVelocity; }) {
-            p->m_yVelocity = val;
-        }
-        if constexpr (requires { p->m_yAccel; }) {
-            p->m_yAccel = val;
-        }
-    }
+inline double getPlayerYVelocity(PlayerObject* p) {
+    return p ? p->m_yVelocity : 0.0;
+}
 
-    inline double getPlayerXVelocity(PlayerObject* p) {
-        if (!p) return 0.0;
-        if constexpr (requires { p->m_xVelocity; }) {
-            return static_cast<double>(p->m_xVelocity);
-        } else if constexpr (requires { p->m_platformerXVelocity; }) {
-            return static_cast<double>(p->m_platformerXVelocity);
-        } else if constexpr (requires { p->m_xAccel; }) {
-            return static_cast<double>(p->m_xAccel);
-        }
-        return 0.0;
-    }
+inline void setPlayerYVelocity(PlayerObject* p, double val) {
+    if (p) p->m_yVelocity = val;
+}
 
-    inline void setPlayerXVelocity(PlayerObject* p, double val) {
-        if (!p) return;
-        if constexpr (requires { p->m_xVelocity; }) {
-            p->m_xVelocity = val;
-        }
-        if constexpr (requires { p->m_platformerXVelocity; }) {
-            p->m_platformerXVelocity = val;
-        }
-        if constexpr (requires { p->m_xAccel; }) {
-            p->m_xAccel = val;
-        }
-    }
+inline double getPlayerXVelocity(PlayerObject* p) {
+    return p ? p->m_platformerXVelocity : 0.0;
+}
+
+inline void setPlayerXVelocity(PlayerObject* p, double val) {
+    if (p) p->m_platformerXVelocity = val;
+}
+
 } // namespace afc::detail
 
 // Struct lưu thông tin trạng thái của các GameObject tương tác (Orbs, Pads, Portals, Triggers)
@@ -75,7 +48,6 @@ struct ObjectStateSnapshot {
 };
 
 // Cấu trúc GameStateSnapshot toàn diện đóng băng trạng thái vật lý của PlayerObject
-// Tham chiếu mô hình State Management của Silicate / yBot / Echo
 struct GameStateSnapshot {
     // Vị trí không gian & toạ độ nội bộ
     CCPoint pos{0.f, 0.f};
@@ -144,10 +116,9 @@ struct GameStateSnapshot {
     void restoreTo(PlayerObject* p) const;
 };
 
-// Alias giữ tương thích ngược với mã nguồn cũ
 using SilicatePlayerState = GameStateSnapshot;
 
-// Gói đóng băng toàn diện PlayLayer + GJGameState + 2 PlayerObject tại 1 frame vật lý cố định
+// Gói đóng băng toàn diện PlayLayer + CheckpointObject + 2 PlayerObject tại 1 frame vật lý cố định
 struct FullPlayLayerSnapshot {
     bool valid = false;
     int frame = 0;
@@ -155,8 +126,6 @@ struct FullPlayLayerSnapshot {
     bool holdingP1 = false;
     bool holdingP2 = false;
 
-    // Trạng thái tổng thể của GJBaseGameLayer::m_gameState (Camera, Dual, TimeWarp, Seed)
-    GJGameState savedGameState{};
     bool isDualMode = false;
 
     Ref<CheckpointObject> engineCkpt = nullptr;
