@@ -1,91 +1,87 @@
 {
-    "geode": "5.11.2",
-    "gd": {
-        "win": "2.2081",
-        "android": "2.2081",
-        "mac": "2.2081",
-        "ios": "2.2081"
-    },
-    "id": "roper.afc",
-    "name": "Auto Frame Counter",
-    "version": "v1.0.0-alpha.4",
-    "developer": "Roper",
-    "description": "Frame Counter with Exact Physics Trajectory Analyzer & Practice Macro Bot.",
-    "settings": {
-        "enable-mod": {
-            "name": "Enable Mod",
-            "description": "Bat hoac tat toan bo hien thi va hoat dong cua mod.",
-            "type": "bool",
-            "default": true
-        },
-        "work-mode": {
-            "name": "Macro Mode",
-            "description": "Record: Ghi macro trong Practice. Auto: Chay bot Analyze bang Trajectory roi luu Replay. Replay Only: Phat lai macro va du lieu Frame Window da luu.",
-            "type": "string",
-            "default": "Auto (Analyze + Replay)",
-            "one-of": [
-                "Record Macro (Practice)",
-                "Auto (Analyze + Replay)",
-                "Replay Saved Data Only"
-            ]
-        },
-        "show-white-trail": {
-            "name": "Show White Trajectory Arc",
-            "description": "Ve duong quy dao mau trang di theo nhan vat.",
-            "type": "bool",
-            "default": true
-        },
-        "show-ahead-trajectory": {
-            "name": "Show Ahead Trajectory (Preview)",
-            "description": "Hien thi duong du doan quy dao bay va diem va cham phia truoc nhan vat.",
-            "type": "bool",
-            "default": true
-        },
-        "target-fps": {
-            "name": "Reference FPS",
-            "description": "Moc FPS dung de tinh Trajectory Frame Window (Mac dinh: 240).",
-            "type": "int",
-            "default": 240,
-            "min": 60,
-            "max": 1000
-        },
-        "toggle-key": {
-            "name": "Custom Toggle Mod Key",
-            "description": "Phim bat/tat mod (VD: A-Z, 0-9, F1-F12, Tab, Shift, Ctrl, Alt, Space...).",
-            "type": "string",
-            "default": "C"
-        },
-        "mode-key": {
-            "name": "Custom Switch Mode Key",
-            "description": "Phim chuyen nhanh che do: Record -> Analyze -> Replay (Mac dinh: M).",
-            "type": "string",
-            "default": "M"
-        },
-        "trajectory-key": {
-            "name": "Custom Trajectory Preview Key",
-            "description": "Phim bat/tat duong du doan quy dao (VD: T, G, F2, Shift...).",
-            "type": "string",
-            "default": "T"
-        },
-        "reset-key": {
-            "name": "Custom Clear Level Data Key",
-            "description": "Phim xoa du lieu Macro & Frame da luu cua level hien tai (VD: R, P, F4, Backspace...).",
-            "type": "string",
-            "default": "R"
-        },
-        "enable-sound": {
-            "name": "Enable Hit Sound",
-            "description": "Phat am thanh khi di qua diem Frame Window.",
-            "type": "bool",
-            "default": true
-        },
-        "sound-volume": {
-            "name": "Sound Volume",
-            "description": "Am luong hieu ung am thanh.",
-            "type": "float",
-            "default": 0.7,
-            "min": 0.0,
-            "max": 1.0
-        }
-    }
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "roper.afc",
+	"name": "Auto Frame Counter",
+	"version": "v1.0.0-alpha.5",
+	"developer": "Roper",
+	"description": "Frame Counter with Exact Physics Trajectory Analyzer & Practice Macro Bot.",
+	"settings": {
+		"enable-mod": {
+			"name": "Enable Mod",
+			"description": "Bat hoac tat toan bo hien thi va hoat dong cua mod.",
+			"type": "bool",
+			"default": true
+		},
+		"work-mode": {
+			"name": "Macro Mode",
+			"description": "Record: Ghi macro trong Practice. Auto: Chay bot Analyze bang Trajectory roi luu Replay. Replay: Chi phat lai file da luu.",
+			"type": "string",
+			"default": "Auto (Analyze + Replay)",
+			"one-of": [
+				"Record Macro (Practice)",
+				"Auto (Analyze + Replay)",
+				"Replay Saved Data Only"
+			]
+		},
+		"render-tray": {
+			"name": "Show Trajectory Line",
+			"description": "Hien thi duong quy dao du doan (Do = chet, Xanh = song).",
+			"type": "bool",
+			"default": true
+		},
+		"render-trail": {
+			"name": "Show White Player Trail",
+			"description": "Ve luu vet duong bay trang cua player da qua.",
+			"type": "bool",
+			"default": true
+		},
+		"display-mode": {
+			"name": "Display Format",
+			"description": "Chon kieu hien thi Frame tren man hinh.",
+			"type": "string",
+			"default": "Detailed (Diff / Total)",
+			"one-of": [
+				"Detailed (Diff / Total)",
+				"Only Delta (Diff)",
+				"Only Total"
+			]
+		},
+		"hud-position": {
+			"name": "HUD Position",
+			"description": "Vi tri hien thi bang thong tin tren man hinh.",
+			"type": "string",
+			"default": "Top-Right",
+			"one-of": [
+				"Top-Left",
+				"Top-Right",
+				"Bottom-Left",
+				"Bottom-Right"
+			]
+		},
+		"font-size": {
+			"name": "Font Scale",
+			"description": "Kich thuoc chu hien thi.",
+			"type": "float",
+			"default": 0.45,
+			"min": 0.2,
+			"max": 1.2
+		},
+		"text-color": {
+			"name": "Text Color",
+			"description": "Mau chu hien thi (HEX RRGGBB).",
+			"type": "color",
+			"default": "#FFFFFF"
+		},
+		"bg-opacity": {
+			"name": "Background Opacity",
+			"description": "Do mo cua nen den (0 -> 255).",
+			"type": "int",
+			"default": 120,
+			"min": 0,
+			"max": 255
+		}
+	}
 }
