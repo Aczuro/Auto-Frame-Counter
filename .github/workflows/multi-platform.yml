@@ -48,18 +48,31 @@ jobs:
           echo "GEODE_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $env:GEODE_SDK = $sdkDir
 
-          # 4. Cài đặt Pre-built Loader Binaries (Geode.lib / Geode.dll) cho v5.11.2
-          # Đặt sẵn cả qua `geode sdk install-binaries` và giải nén trực tiếp vào `$sdkDir\bin\5.11.2` để đảm bảo 100% CMake tìm thấy
-          $binDir = "$sdkDir\bin\5.11.2"
-          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          gh release download v5.11.2 --repo geode-sdk/geode --pattern "*win.zip" --dir $binDir --clobber
-          $sdkWinZip = Get-ChildItem -Path $binDir -Filter "*.zip" | Select-Object -First 1
-          7z x $sdkWinZip.FullName "-o$binDir" -y | Out-Null
-          Remove-Item $sdkWinZip.FullName -Force
+          # 4. Tải gói Pre-built Loader Binaries (Geode.lib / Geode.dll) của v5.11.2
+          # Đặt trực tiếp vào cả `$sdkDir\bin\5.11.2` và `$sdkDir\bin\nightly` để CMake tìm thấy ngay lập tức
+          # (Không gọi `geode.exe sdk install-binaries` vì CLI yêu cầu phải có game Geometry Dash cài sẵn trên máy ảo)
+          $dlDir = "$env:RUNNER_TEMP\geode-bin-dl"
+          New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
+          gh release download v5.11.2 --repo geode-sdk/geode --pattern "*win.zip" --dir $dlDir --clobber
+          $sdkWinZip = Get-ChildItem -Path $dlDir -Filter "*.zip" | Select-Object -First 1
 
-          # Đồng bộ đường dẫn SDK với Geode CLI
-          & "$cliDir\geode.exe" sdk set-path $sdkDir || $true
-          & "$cliDir\geode.exe" sdk install-binaries -p win64 || $true
+          $extractDir = "$dlDir\extracted"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          7z x $sdkWinZip.FullName "-o$extractDir" -y | Out-Null
+
+          $binVersionDir = "$sdkDir\bin\5.11.2"
+          $binNightlyDir = "$sdkDir\bin\nightly"
+          New-Item -ItemType Directory -Force -Path $binVersionDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $binNightlyDir | Out-Null
+
+          # Copy toàn bộ Geode.lib / Geode.dll từ gói zip vào thư mục bin/5.11.2 và bin/nightly
+          Get-ChildItem -Path $extractDir -Recurse -File | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination "$binVersionDir\$($_.Name)" -Force
+              Copy-Item -Path $_.FullName -Destination "$binNightlyDir\$($_.Name)" -Force
+          }
+
+          Write-Host "Installed Geode binaries in ${binVersionDir}:"
+          Get-ChildItem -Path $binVersionDir | Format-Table Name, Length
 
           # 5. Cấu hình thư mục cache cho CPM
           $cpmCache = "$env:RUNNER_TEMP\cpm-cache"
