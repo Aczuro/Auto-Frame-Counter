@@ -1,0 +1,83 @@
+name: Build Geode Mod
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: Windows
+            os: windows-latest
+            target: Win64
+          - name: macOS
+            os: macos-latest
+            target: MacOS
+          - name: Android32
+            os: ubuntu-latest
+            target: Android32
+          - name: Android64
+            os: ubuntu-latest
+            target: Android64
+
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Workaround cho lỗi upstream của geode-sdk/build-geode-mod trên Windows:
+      # Action gốc gọi `curl -L https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip -o ninja.zip`
+      # nhưng URL `/latest/download/ninja-win.zip` trả về 92 bytes ("Not Found" / 404).
+      # Bước này tạo một wrapper `curl.bat` đứng trước trong PATH để tự động chuyển hướng
+      # URL ninja-win.zip bị hỏng sang bản cố định v1.12.1 hợp lệ.
+      - name: Patch broken ninja-win.zip URL for geode-sdk/build-geode-mod (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $shimDir = "$env:RUNNER_TEMP\curl_shim"
+          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+
+          $batContent = @'
+          @echo off
+          setlocal EnableDelayedExpansion
+          set "ARGS="
+          :loop
+          if "%~1"=="" goto :run
+          set "ARG=%~1"
+          if "!ARG!"=="https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip" (
+              set "ARG=https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
+          )
+          set "ARGS=!ARGS! "!ARG!""
+          shift
+          goto :loop
+          :run
+          "%SystemRoot%\System32\curl.exe" !ARGS!
+          '@
+
+          Set-Content -Path "$shimDir\curl.bat" -Value $batContent -Encoding Ascii
+          Set-Content -Path "$shimDir\curl.cmd" -Value $batContent -Encoding Ascii
+          echo "$shimDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build the mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          sdk: nightly
+          target: ${{ matrix.config.target }}
+
+      - name: Upload built .geode artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoFrameCounter-${{ matrix.config.name }}
+          path: ${{ steps.build.outputs.build-output }}
+          if-no-files-found: ignore
