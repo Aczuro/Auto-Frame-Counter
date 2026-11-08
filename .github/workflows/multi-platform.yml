@@ -1,4 +1,4 @@
-name: Build Geode Mod
+name: Build Geode Mod (PC - Windows)
 
 on:
   push:
@@ -8,76 +8,61 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - name: Windows
-            os: windows-latest
-            target: Win64
-          - name: macOS
-            os: macos-latest
-            target: MacOS
-          - name: Android32
-            os: ubuntu-latest
-            target: Android32
-          - name: Android64
-            os: ubuntu-latest
-            target: Android64
-
-    name: ${{ matrix.config.name }}
-    runs-on: ${{ matrix.config.os }}
+  build-windows:
+    name: Windows (Win64)
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Workaround cho lỗi upstream của geode-sdk/build-geode-mod trên Windows:
-      # Action gốc gọi `curl -L https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip -o ninja.zip`
-      # nhưng URL `/latest/download/ninja-win.zip` trả về 92 bytes ("Not Found" / 404).
-      # Bước này tạo một wrapper `curl.bat` đứng trước trong PATH để tự động chuyển hướng
-      # URL ninja-win.zip bị hỏng sang bản cố định v1.12.1 hợp lệ.
-      - name: Patch broken ninja-win.zip URL for geode-sdk/build-geode-mod (Windows)
-        if: runner.os == 'Windows'
+      # Tự cài đặt Geode CLI + Geode SDK v5.11.2 trực tiếp trên Windows
+      # Hoàn toàn KHÔNG dùng geode-sdk/build-geode-mod@main để tránh lỗi ninja.zip 92 bytes và lỗi ép lên SDK 6.0.0-alpha.1
+      - name: Setup Geode CLI & Geode SDK v5.11.2
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $shimDir = "$env:RUNNER_TEMP\curl_shim"
-          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+          $ErrorActionPreference = "Stop"
 
-          $batContent = @'
-          @echo off
-          setlocal EnableDelayedExpansion
-          set "ARGS="
-          :loop
-          if "%~1"=="" goto :run
-          set "ARG=%~1"
-          if "!ARG!"=="https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip" (
-              set "ARG=https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
-          )
-          set "ARGS=!ARGS! "!ARG!""
-          shift
-          goto :loop
-          :run
-          "%SystemRoot%\System32\curl.exe" !ARGS!
-          '@
+          # 1. Cài đặt Ninja qua Chocolatey (có sẵn trên Windows runner)
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+              choco install ninja -y --no-progress
+          }
 
-          Set-Content -Path "$shimDir\curl.bat" -Value $batContent -Encoding Ascii
-          Set-Content -Path "$shimDir\curl.cmd" -Value $batContent -Encoding Ascii
-          echo "$shimDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # 2. Tải Geode CLI bản Windows mới nhất thông qua GitHub CLI (có xác thực GH_TOKEN, không bao giờ lỗi 92 bytes)
+          $cliDir = "$env:RUNNER_TEMP\geode-cli"
+          New-Item -ItemType Directory -Force -Path $cliDir | Out-Null
+          gh release download --repo geode-sdk/cli --pattern "*win*.zip" --dir $cliDir --clobber
+          $cliZip = Get-ChildItem -Path $cliDir -Filter "*.zip" | Select-Object -First 1
+          7z x $cliZip.FullName "-o$cliDir" -y | Out-Null
+          echo "$cliDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$cliDir;$env:PATH"
 
-      - name: Build the mod
-        id: build
-        uses: geode-sdk/build-geode-mod@main
+          # 3. Clone đúng nhánh tag v5.11.2 của Geode SDK khớp 100% với mod.json ("geode": "5.11.2")
+          $sdkDir = "$env:GITHUB_WORKSPACE\geode-sdk"
+          git clone --depth 1 --branch v5.11.2 https://github.com/geode-sdk/geode.git $sdkDir
+          echo "GEODE_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          # 4. Tạo sẵn thư mục CPM cache để CMake tải các thư viện phụ trợ ổn định
+          $cpmCache = "$env:RUNNER_TEMP\cpm-cache"
+          New-Item -ItemType Directory -Force -Path $cpmCache | Out-Null
+          echo "CPM_SOURCE_CACHE=$cpmCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure and Build Mod (Windows x64)
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          sdk: nightly
-          target: ${{ matrix.config.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
 
-      - name: Upload built .geode artifact
+      - name: Upload built .geode package
         uses: actions/upload-artifact@v4
         with:
-          name: AutoFrameCounter-${{ matrix.config.name }}
-          path: ${{ steps.build.outputs.build-output }}
-          if-no-files-found: ignore
+          name: AutoFrameCounter-Windows
+          path: |
+            build/*.geode
+            build/Release/*.geode
+          if-no-files-found: error
