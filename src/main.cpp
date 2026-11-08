@@ -265,7 +265,7 @@ class $modify(AFCPlayLayer, PlayLayer) {
 };
 
 // ============================================================================
-// 2. PAUSELAYER HOOK: Thêm nút mở AdvancedFrameCounterPopup ngay trong Pause Menu
+// 2. PAUSELAYER HOOK: Thêm Button mở AdvancedFrameCounterPopup vào Pause Menu
 // ============================================================================
 class $modify(AFCPauseLayer, PauseLayer) {
     void customSetup() {
@@ -296,18 +296,18 @@ class $modify(AFCPauseLayer, PauseLayer) {
 };
 
 // ============================================================================
-// 3. GJBASEGAMELAYER HOOK: Đồng bộ Fixed Timestep Physics & Giả lập Input
+// 3. GJBASEGAMELAYER HOOK: Core Loop (processCommands) & Input Injection (handleButton)
 // ============================================================================
 class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
-    void processCommands(float dt) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto* pl = typeinfo_cast<PlayLayer*>(this);
         if (!pl || !isModEnabled()) {
-            GJBaseGameLayer::processCommands(dt);
+            GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
             return;
         }
 
         if (TrajectorySim::isSimulating()) {
-            GJBaseGameLayer::processCommands(dt);
+            GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
             return;
         }
 
@@ -398,7 +398,7 @@ class $modify(AFCBaseGameLayer, GJBaseGameLayer) {
             }
         }
 
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
 
         afcPl->refreshAnticHud();
         afcPl->renderVisualOverlays();
