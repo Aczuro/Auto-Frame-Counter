@@ -10,14 +10,19 @@ on:
 jobs:
   build-windows:
     name: Windows (Win64)
-    runs-on: windows-latest
+    # Khóa cố định windows-2022 để luôn có sẵn Visual Studio 17 2022 + MSVC x64
+    runs-on: windows-2022
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Tự cài đặt Geode CLI + Geode SDK v5.11.2 trực tiếp trên Windows
-      # Hoàn toàn KHÔNG dùng geode-sdk/build-geode-mod@main để tránh lỗi ninja.zip 92 bytes và lỗi ép lên SDK 6.0.0-alpha.1
+      # Kích hoạt môi trường biên dịch MSVC x64 (cl.exe, link.exe, lib.exe) và Ninja
+      - name: Setup MSVC x64 Developer Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Setup Geode CLI & Geode SDK v5.11.2
         shell: pwsh
         env:
@@ -25,37 +30,36 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # 1. Cài đặt Ninja qua Chocolatey (có sẵn trên Windows runner)
+          # 1. Đảm bảo Ninja có sẵn
           if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
               choco install ninja -y --no-progress
           }
 
-          # 2. Tải Geode CLI bản Windows mới nhất thông qua GitHub CLI (có xác thực GH_TOKEN, không bao giờ lỗi 92 bytes)
+          # 2. Tải Geode CLI bản Windows qua GitHub CLI có xác thực GH_TOKEN
           $cliDir = "$env:RUNNER_TEMP\geode-cli"
           New-Item -ItemType Directory -Force -Path $cliDir | Out-Null
           gh release download --repo geode-sdk/cli --pattern "*win*.zip" --dir $cliDir --clobber
           $cliZip = Get-ChildItem -Path $cliDir -Filter "*.zip" | Select-Object -First 1
           7z x $cliZip.FullName "-o$cliDir" -y | Out-Null
           echo "$cliDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $env:PATH = "$cliDir;$env:PATH"
 
-          # 3. Clone đúng nhánh tag v5.11.2 của Geode SDK khớp 100% với mod.json ("geode": "5.11.2")
+          # 3. Clone đúng tag v5.11.2 của Geode SDK khớp với mod.json ("geode": "5.11.2")
           $sdkDir = "$env:GITHUB_WORKSPACE\geode-sdk"
           git clone --depth 1 --branch v5.11.2 https://github.com/geode-sdk/geode.git $sdkDir
           echo "GEODE_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          # 4. Tạo sẵn thư mục CPM cache để CMake tải các thư viện phụ trợ ổn định
+          # 4. Cấu hình thư mục cache cho CPM
           $cpmCache = "$env:RUNNER_TEMP\cpm-cache"
           New-Item -ItemType Directory -Force -Path $cpmCache | Out-Null
           echo "CPM_SOURCE_CACHE=$cpmCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Configure and Build Mod (Windows x64)
+      - name: Configure and Build Mod (Ninja + MSVC x64)
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --parallel
 
       - name: Upload built .geode package
