@@ -10,20 +10,18 @@ on:
 jobs:
   build-windows:
     name: Windows (Win64)
-    # Khóa cố định windows-2022 để luôn có sẵn Visual Studio 17 2022 + MSVC x64
     runs-on: windows-2022
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Kích hoạt môi trường biên dịch MSVC x64 (cl.exe, link.exe, lib.exe) và Ninja
       - name: Setup MSVC x64 Developer Prompt
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Setup Geode CLI & Geode SDK v5.11.2
+      - name: Setup Geode CLI, SDK v5.11.2 & Pre-built Binaries
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,20 +33,35 @@ jobs:
               choco install ninja -y --no-progress
           }
 
-          # 2. Tải Geode CLI bản Windows qua GitHub CLI có xác thực GH_TOKEN
+          # 2. Tải Geode CLI bản Windows qua GitHub CLI
           $cliDir = "$env:RUNNER_TEMP\geode-cli"
           New-Item -ItemType Directory -Force -Path $cliDir | Out-Null
           gh release download --repo geode-sdk/cli --pattern "*win*.zip" --dir $cliDir --clobber
           $cliZip = Get-ChildItem -Path $cliDir -Filter "*.zip" | Select-Object -First 1
           7z x $cliZip.FullName "-o$cliDir" -y | Out-Null
           echo "$cliDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$cliDir;$env:PATH"
 
           # 3. Clone đúng tag v5.11.2 của Geode SDK khớp với mod.json ("geode": "5.11.2")
           $sdkDir = "$env:GITHUB_WORKSPACE\geode-sdk"
           git clone --depth 1 --branch v5.11.2 https://github.com/geode-sdk/geode.git $sdkDir
           echo "GEODE_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $env:GEODE_SDK = $sdkDir
 
-          # 4. Cấu hình thư mục cache cho CPM
+          # 4. Cài đặt Pre-built Loader Binaries (Geode.lib / Geode.dll) cho v5.11.2
+          # Đặt sẵn cả qua `geode sdk install-binaries` và giải nén trực tiếp vào `$sdkDir\bin\5.11.2` để đảm bảo 100% CMake tìm thấy
+          $binDir = "$sdkDir\bin\5.11.2"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          gh release download v5.11.2 --repo geode-sdk/geode --pattern "*win.zip" --dir $binDir --clobber
+          $sdkWinZip = Get-ChildItem -Path $binDir -Filter "*.zip" | Select-Object -First 1
+          7z x $sdkWinZip.FullName "-o$binDir" -y | Out-Null
+          Remove-Item $sdkWinZip.FullName -Force
+
+          # Đồng bộ đường dẫn SDK với Geode CLI
+          & "$cliDir\geode.exe" sdk set-path $sdkDir || $true
+          & "$cliDir\geode.exe" sdk install-binaries -p win64 || $true
+
+          # 5. Cấu hình thư mục cache cho CPM
           $cpmCache = "$env:RUNNER_TEMP\cpm-cache"
           New-Item -ItemType Directory -Force -Path $cpmCache | Out-Null
           echo "CPM_SOURCE_CACHE=$cpmCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
